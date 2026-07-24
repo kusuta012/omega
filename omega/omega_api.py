@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from omega.storage.postgres_session import db_pool
 from omega.api_routes.sys_health import health_router
+from omega.api_routes.ingestion_endpoints import ingestion_router
 
 @asynccontextmanager
 async def sys_lifespan(app: FastAPI):
@@ -16,3 +17,4 @@ omega_app = FastAPI(
 )
 
 omega_app.include_router(health_router, prefix="/api/v1")
+omega_app.include_router(ingestion_router, prefix="/api/v1")
