@@ -1,0 +1,15 @@
+services:
+  omega_db:
+    image: ankane/pgvector:latest
+    environment:
+      POSTGRES_USER: omega
+      POSTGRES_PASSWORD: pieistlecker
+      POSTGRES_DB: omega_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - omega_db_data:/var/lib/postgresql/data
+
+volumes:
+  omega_db_data:
