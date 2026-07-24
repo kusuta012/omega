@@ -2,3 +2,6 @@ fastapi
 uvicorn
 asyncpg
 pydantic-settings
+trafilatura
+pdfplumber
+httpx
