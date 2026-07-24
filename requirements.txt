@@ -5,3 +5,4 @@ pydantic-settings
 trafilatura
 pdfplumber
 httpx
+sentence-transformers

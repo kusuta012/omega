@@ -37,13 +37,13 @@ async def claim_next_job():
         return row
 
 async def mark_job_complete(job_id: str, item_id: str):
-    async with db_pool.pool.acquire() as conn:
+    async with db_pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("UPDATE jobs SET status = 'done', updated_at = now() WHERE id = $1", job_id)
             await conn.execute("UPDATE items SET status = 'done' WHERE id = $1", item_id)
 
 async def mark_job_failed(job_id: str, item_id: str, error_msg: str, attempts: int, max_attempts: int = 3):
-    async with db_pool.pool_acquire() as conn:
+    async with db_pool.acquire() as conn:
         async with conn.transaction():
             if attempts >= max_attempts:
                 await conn.execute("UPDATE jobs SET status = 'failed', last_error = $1, updated_at = now() WHERE id = $2", error_msg, job_id)
