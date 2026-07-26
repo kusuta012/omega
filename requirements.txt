@@ -6,3 +6,5 @@ trafilatura
 pdfplumber
 httpx
 sentence-transformers
+groq
+tenacity
