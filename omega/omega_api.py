@@ -5,6 +5,7 @@ from omega.api_routes.sys_health import health_router
 from omega.api_routes.ingestion_endpoints import ingestion_router
 from omega.api_routes.retrieval_endpoints import retrieval_router
 from omega.api_routes.management_endpoints import management_router
+from omega.api_routes.agent_endpoints import router as agent_router
 
 @asynccontextmanager
 async def sys_lifespan(app: FastAPI):
@@ -22,3 +23,4 @@ omega_app.include_router(health_router, prefix="/api/v1")
 omega_app.include_router(ingestion_router, prefix="/api/v1")
 omega_app.include_router(retrieval_router, prefix="/api/v1")
 omega_app.include_router(management_router, prefix="/api/v1")
+omega_app.include_router(agent_router)
