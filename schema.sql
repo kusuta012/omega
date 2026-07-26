@@ -22,7 +22,7 @@ CREATE TABLE chunks (
 
 CREATE TABLE jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    item_id UUID REFERENCES items(id),
+    item_id UUID REFERENCES items(id) ON DELETE CASCADE,
     job_type TEXT,
     status TEXT DEFAULT 'pending',
     attempts INT DEFAULT 0,
