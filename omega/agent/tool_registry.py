@@ -126,7 +126,7 @@ class ToolExecutor:
         ambiguity_note = ""
         if len(matches) > 1:
             match_titles = [f"'{m['title']}'" for m in matches]
-            amiguity_note = f"\n\n[Note: Found {len(matches)} matching items ({', '.join(match_titles)}). Summarizing the most recent one '{matches[0]['title']}']"
+            ambiguity_note = f"\n\n[Note: Found {len(matches)} matching items ({', '.join(match_titles)}). Summarizing the most recent one '{matches[0]['title']}']"
 
         item_id = matches[0]["id"]
         item_title = matches[0]["title"] or "Untitled"
@@ -174,7 +174,7 @@ class ToolExecutor:
                 "success": True,
                 "answer": "Your knowledge base is empty, No items have been saved yet",
                 "sources": [],
-                "result summary": "0 items in knowledge base"
+                "result_summary": "0 items in knowledge base"
             }
 
         lines = [f"You have {total_count} item(s) in your knowledge base. Here are the most recent:\n"]
