@@ -4,13 +4,14 @@ import logging
 
 logger = logging.getLogger("RetrievalQueries")
 
-async def search_hybrid_chunks(query_text: str, query_embedding: list[float], top_k: int = 5):
+async def search_hybrid_chunks(query_text: str, query_embedding: list[float], top_k: int = 5, distance_threshold: float = 0.6, min_rrf_score: float = 0.01, min_keyword_rank: float = 0.05):
     embedding_json = json.dumps(query_embedding)
     hybrid_query = """
         WITH vector_search AS (
             SELECT id, item_id, chunk_index, content,
                 ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) as rank
             FROM chunks
+            WHERE embedding <=> $1::vector < $4
             ORDER BY embedding <=> $1::vector
             LIMIT 20
         ),
@@ -19,6 +20,7 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
                     ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english',$2)) DESC) as rank
             FROM chunks
             WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $2)
+            AND ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', $2)) >= $5
             ORDER BY ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', $2)) DESC
             LIMIT 20
         ),
@@ -40,10 +42,11 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
             i.source_ref
         FROM rrf_fusion r
         JOIN items i ON r.item_id = i.id
+        WHERE r.rrf_score >= $6
         ORDER BY r.rrf_score DESC
         LIMIT $3;
     """
 
     async with db_pool.acquire() as conn:
-        records = await conn.fetch(hybrid_query, embedding_json, query_text, top_k)
+        records = await conn.fetch(hybrid_query, embedding_json, query_text, top_k, distance_threshold, min_keyword_rank, min_rrf_score)
         return [dict (record) for record in records]

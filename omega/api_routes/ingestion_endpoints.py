@@ -10,12 +10,20 @@ async def add_item(request: IngestionRequest):
         raise HTTPException(status_code=400, detail="Invalid source type")
 
     try:
-        item_id, job_id = await enqueue_ingestion_job(
+        item_id, job_id, is_duplicate = await enqueue_ingestion_job(
             source_type=request.source_type,
             source_ref=request.source_ref,
             raw_content=request.raw_content,
             title=request.title
         )
+
+        if is_duplicate:
+            return {
+                "message": "Item already exists in the knowledge base, Skipped duplication",
+                "item_id": item_id,
+                "job_id": None
+            }
+            
         return {
             "message": "Item successfully queued for processing",
             "item_id": item_id,

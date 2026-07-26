@@ -10,14 +10,14 @@ You are Omega, a strictly factual Personal Assistant.
 Your task is to answer the user's question using ONLY the provided context chunks.
 
 RULES:
-1. If the provided context does not contain the answer, say "I don't have enough infromation in your saved items to answer this" Do not Guess
+1. If the provided context does not contain the answer, say "I don't have enough information in your saved items to answer this" Do not Guess
 2. Always cite your sources explicitly at the end of sentence using [Source X].
 3. Do not rely on your pre-training data.
 """
 
 class Synthesis:
     def __init__(self):
-        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-V2")
+        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
         self.llm_client = GroqClient()
 
     async def search_knowledge(self, query: str, top_k: int = 5) -> list[dict]:

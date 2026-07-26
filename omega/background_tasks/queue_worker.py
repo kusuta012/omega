@@ -53,11 +53,20 @@ async def execute_job(job: dict):
         logger.error(f"Job {job_id} failed {str(error)}")
         await mark_job_failed(job_id, item_id, str(error), attempts)
 
+async def stuck_job_monitor():
+    while True:
+        try:
+            await reset_stuck_jobs()
+            logger.debug("swept for stuck jobs")
+        except Exception as e:
+            logger.error(f"failed to reset stuck jobs: {e}")
+        await asyncio.sleep(300)
+
 async def worker_loop():
     await db_pool.connect()
     logger.info("Worker connected to Database")
-    await reset_stuck_jobs()
-    logger.info("checked for stuck jobs, beginning polling loop...")
+    monitor_task = asyncio.create_task(stuck_job_monitor())
+    logger.info("beginning polling loop...")
 
     try:
         while True:
@@ -69,6 +78,7 @@ async def worker_loop():
     except asyncio.CancelledError:
         logger.info("Worker shutting down gracefully...")
     finally:
+        monitor_task.cancel()
         await db_pool.disconnect()
 
 if __name__ == "__main__":

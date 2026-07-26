@@ -1,14 +1,32 @@
 from omega.storage.postgres_session import db_pool
+import hashlib
 
+def generate_content_hash(source_type: str, source_ref: str | None, raw_content: str | None) -> str:
+    if source_type in ['url', 'pdf'] and source_ref:
+        base_string = f"{source_type}:{source_ref}"
+    elif raw_content:
+        base_string = f"{source_type}:{raw_content}"
+    else:
+        import uuid
+        base_string = str(uuid.uuid4())
 
-async def enqueue_ingestion_job(source_type: str, source_ref: str, raw_content: str, title: str):
+    return hashlib.sha256(base_string.encode('utf-8')).hexdigest()
+
+async def enqueue_ingestion_job(source_type: str, source_ref: str | None, raw_content: str | None, title: str | None):  
+    content_hash = generate_content_hash(source_type, source_ref, raw_content)
+
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             item_id = await conn.fetchval("""
-                INSERT INTO items (source_type, source_ref, raw_content, title, status)
-                VALUES ($1, $2, $3, $4, 'pending')
+                INSERT INTO items (source_type, source_ref, raw_content, title, status, content_hash)
+                VALUES ($1, $2, $3, $4, 'pending', $5)
+                ON CONFLICT (content_hash) DO NOTHING
                 RETURNING id
-            """, source_type, source_ref, raw_content, title)
+            """, source_type, source_ref, raw_content, title, content_hash)
+
+            if item_id is None:
+                existing_item_id = await conn.fetchval("SELECT id FROM items WHERE content_hash = $1", content_hash)
+                return existing_item_id, None, True
 
             job_id = await conn.fetchval("""
                 INSERT INTO jobs (item_id, job_type, status)
@@ -16,7 +34,7 @@ async def enqueue_ingestion_job(source_type: str, source_ref: str, raw_content: 
                 RETURNING id
             """, item_id)
 
-            return item_id, job_id
+            return item_id, job_id, False
 
 async def claim_next_job():
     async with db_pool.pool.acquire() as conn:

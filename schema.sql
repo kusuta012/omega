@@ -7,7 +7,8 @@ CREATE TABLE items (
     title TEXT,
     raw_content TEXT,
     created_at TIMESTAMP DEFAULT now(),
-    status TEXT DEFAULT 'pending'
+    status TEXT DEFAULT 'pending',
+    content_hash VARCHAR(64) unique
 );
 
 CREATE TABLE chunks (
@@ -37,3 +38,6 @@ CREATE TABLE digests (
     content TEXT,
     created_at TIMESTAMP DEFAULT now()
 );
+
+CREATE INDEX idx_chunks_item_id ON chunks(item_id);
+CREATE INDEX idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
