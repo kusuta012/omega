@@ -1,7 +1,7 @@
 import logging
 from omega.embeddings.embedding_service import EmbeddingService
 from omega.storage.retrieval_queries import search_hybrid_chunks
-from omega.llm.client import GroqClient
+from omega.llm.client import get_llm_provider
 
 logger = logging.getLogger("Synthesis")
 
@@ -18,7 +18,7 @@ RULES:
 class Synthesis:
     def __init__(self):
         self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
-        self.llm_client = GroqClient()
+        self.llm_client = get_llm_provider()
 
     async def search_knowledge(self, query: str, top_k: int = 5) -> list[dict]:
         query_vector = self.embedding_service.generate_single_embedding(query)

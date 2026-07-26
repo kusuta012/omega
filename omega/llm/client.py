@@ -1,42 +1,167 @@
 import logging
-from groq import AsyncGroq
+import json
+import re
+from abc import ABC, abstractmethod
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from omega.environment.conf_loader import omega_settings
 import httpx
 
-logger = logging.getLogger("GroqClient")
+logger = logging.getLogger("LLMProvider")
 
-class GroqClient:
-    def __init__(self, model_name: str = "llama-3.1-8b-instant"):
-        self.model_name = model_name
-        self.api_key = omega_settings.groq_api_key
-        if self.api_key:
-            self.client = AsyncGroq(
-                api_key=self.api_key,
-                timeout=30,
-                max_retries=0
-            )
-        else:
-            self.client = None
-            logger.warning("GROQ_API_KEY is missing! llm generation will fail")
+class LLMProvider(ABC):
+    @abstractmethod
+    async def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
+        pass
+
+    @abstractmethod
+    async def generate_json(self, system_prompt: str, user_prompt: str) -> str:
+        pass
+
+class OpenAICompatibleProvider(LLMProvider):
+    def __init__(self):
+        self.base_url = omega_settings.llm_base_url.rstrip("/")
+        self.api_key = omega_settings.llm_api_key
+        self.model = omega_settings.llm_model
+        if not self.api_key:
+            logger.warning("LLM_API_KEY is missing! llm generation will fail")
 
     @retry(
-        stop=stop_after_attempt(4),
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
-        before_sleep=lambda retry_state: logger.warning(f"Groq API error, retrying.. (Attempt {retry_state.attempt_number})")
+        before_sleep=lambda retry_state: logger.warning(f"LLM API error, retrying.. (Attempt {retry_state.attempt_number})")
     )
-    async def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
-        if not self.client:
-            raise ValueError("Missing groq api key, Set GROQ_API_KEY in .env")
+    async def _call_api(self, payload: dict) -> dict:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
 
-        response = await self.client.chat.completions.create(
-            messages=[
+    async def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            model=self.model_name,
-            temperature=0.2,
-            max_tokens=1024
+            "temperature": 0.2,
+            "max_tokens": 1024
+        }
+        data = await self._call_api(payload)
+        return data["choices"][0]["message"]["content"]
+
+    async def generate_json(self, system_prompt: str, user_prompt: str) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 512,
+            "response_format": {"type": "json_object"}
+        }
+
+        try:
+            data = await self._call_api(payload)
+            content = data["choices"][0]["message"]["content"]
+            json.loads(content)
+            return content
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                logger.warning("JSON mode not supported by this model/provider, falling back to regex extraction")
+            else:
+                raise e
+        except json.JSONDecodeError:
+            logger.warning("Provider returned invalid JSON despite json mode, failling back to refex extraction")
+
+        fallback = system_prompt + "\n\n CRITICAL: You MUST respond with only valid JSON, No markdown, no explanations"
+        payload["messages"][0]["content"] = fallback
+        payload.pop("response_format", None)
+
+        data = await self._call_api(payload)
+        content = data["choices"][0]["message"]["content"]
+
+        match = re.search(r'(\{.*?\}|\[.*?\])', content, re.DOTALL)
+        if match:
+            extracted = match.group(1)
+            try:
+                json.loads(extracted)
+                return extracted
+            except json.JSONDecodeError:
+                pass
+        
+        raise ValueError(f"Failed to generate parseable JSON, raw output {content}")
+
+class AnthropicProvider(LLMProvider):
+    def __init__(self):
+        self.api_key = omega_settings.llm_api_key
+        self.model = omega_settings.llm_model
+        if not self.api_key:
+            logger.warning("LLM_API_KEY is missing! llm generation will fail")
+
+        
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        before_sleep=lambda rs: logger.warning(f"LLM API error, retrying.. (Attempt {rs.attempt_number})")
+    )
+    async def _call_api(self, payload: dict) -> dict:
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+    async def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
+        payload = {
+            "model": self.model,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "temperature": 0.2,
+            "max_tokens": 1024
+        }
+        data = await self._call_api(payload)
+        return next(
+            block["text"] for block in data["content"]
+            if block["type"] == "text"
         )
-        return response.choices[0].message.content
+
+    async def generate_json(self, system_prompt: str, user_prompt: str) -> str:
+        payload = {
+            "model": self.model,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "temperature": 0.1,
+            "max_tokens": 512,
+            "output_config": {
+                "format": {
+                    "type": "json_object"
+                }
+            }
+        }
+        data = await self._call_api(payload)
+        content = next(
+            block["text"] for block in data["content"]
+            if block["type"] == "text"
+        )
+        json.loads(content)
+        return content
+
+def get_llm_provider() -> LLMProvider:
+    provider_type = omega_settings.llm_provider.lower()
+    if provider_type == "openai_compatible":
+        return OpenAICompatibleProvider()
+    elif provider_type == "anthropic":
+        return AnthropicProvider()
+    else:
+        raise ValueError(f"Unknown LLM_PROVIDER: {provider_type}, use 'openai_compatible' or 'antrhopic'..")
