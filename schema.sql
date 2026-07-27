@@ -41,3 +41,37 @@ CREATE TABLE digests (
 
 CREATE INDEX idx_chunks_item_id ON chunks(item_id);
 CREATE INDEX idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
+
+CREATE TABLE sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    started_at TIMESTAMP DEFAULT now(),
+    ended_at TIMESTAMP,
+    status TEXT DEFAULT 'active'
+);
+
+CREATE TABLE messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tool_name TEXT,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE memory_entries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    memory_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding VECTOR(384),
+    source_session_id UUID REFERENCES sessions(id),
+    occurred_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT now(),
+    importance FLOAT DEFAULT 0.5,
+    access_count INT DEFAULT 0,
+    last_accessed_at TIMESTAMP,
+    metadata JSONB
+);
+
+CREATE INDEX idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX idx_memory_type_date ON memory_entries(memory_type, occurred_at);
+CREATE INDEX idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);

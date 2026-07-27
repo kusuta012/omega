@@ -1,8 +1,13 @@
 import logging
 from omega.storage.memory_queries import (
-    create_session, get_active_session, close_session,
-    get_session_messages, append_message, store_memory_entry,
-    mark_messages_compressed, get_message_span
+    create_session,
+    get_active_session,
+    close_session,
+    get_session_messages,
+    append_message,
+    store_memory_entry,
+    mark_messages_compressed,
+    get_message_span,
 )
 from omega.memory.context_build import estimate_tokens, build_system_context
 from omega.memory.core import ensure_memory_dir
@@ -30,6 +35,7 @@ Include:
 
 Be thorough but concise. This summary will be used to provide continuity in future sessions"""
 
+
 class SessionManager:
     def __init__(self):
         self.active_session_id = None
@@ -37,7 +43,7 @@ class SessionManager:
         self.llm_client = get_llm_provider()
         self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
         ensure_memory_dir()
-    
+
     async def ensure_session(self) -> str:
         if self.active_session_id:
             return self.active_session_id
@@ -62,35 +68,40 @@ class SessionManager:
 
         messages = await get_session_messages(self.active_session_id)
         if len(messages) >= 2:
-            await self._create_session_summary(messages)
-            
+            try:
+                await self._create_session_summary(messages)
+            except Exception as e:
+                logger.error(f"Failed to create session summary during session close: {e}")
+
         await close_session(self.active_session_id)
-        logger.info(f"Session {self.active_session_id} closed with summary")
+        logger.info(f"Session {self.active_session_id} closed")
         self.active_session_id = None
         self.system_context = None
 
     async def _create_session_summary(self, messages: list[dict]):
-        conversation_text = self._format_messages_for_summary(messages)
-        summary = await self.llm_client.generate_answer(SESSION_CLOSE_PROMPT, conversation_text)
+        conversation_text = self._format_message_for_summary(messages)
+        summary = await self.llm_client.generate_answer(
+            SESSION_CLOSE_PROMPT, conversation_text
+        )
         embedding = self.embedding_service.generate_single_embedding(summary)
 
         await store_memory_entry(
             memory_type="session_summary",
             content=summary,
+            embedding=embedding,
             source_session_id=self.active_session_id,
-            metadata={"message_count": len(messages), "trigger": "session_close"}
+            metadata={"message_count": len(messages), "trigger": "session_close"},
         )
-        logger.info(f"Created session summary for {self.active_session_id} ({len(messages)} messages)")
+        logger.info(
+            f"Created session summary for {self.active_session_id} ({len(messages)} messages)"
+        )
 
     async def add_message(self, role: str, content: str, tool_name: str = None):
         await append_message(self.active_session_id, role, content, tool_name)
 
     async def get_context_messages(self) -> list[dict]:
         messages = await get_session_messages(self.active_session_id)
-        return [
-            {"role": m["role"], "content": m["content"]}
-            for m in messages
-        ]
+        return [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")]
 
     async def check_and_compress(self, tool_schemas_text: str = ""):
         messages = await get_session_messages(self.active_session_id)
@@ -102,18 +113,21 @@ class SessionManager:
         budget = omega_settings.session_token_budget
         ratio = total_tokens / budget
 
-        if ratio >= omega_settings.session_emergency_ratio:
-            logger.warning(f"Emergency compression triggered ({ratio:.0%} of budget)")
-            await self._compress(messages, aggressive=True)
-        elif ratio >= omega_settings.session_compression_ratio:
-            logger.info(f"standard compression triggered ({ratio:.0%} of budget)")
-            await self._compress(messages, aggressive=False)
+        try:
+            if ratio >= omega_settings.session_emergency_ratio:
+                logger.warning(f"Emergency compression triggered ({ratio:.0%} of budget)")
+                await self._compress(messages, aggressive=True)
+            elif ratio >= omega_settings.session_compression_ratio:
+                logger.info(f"standard compression triggered ({ratio:.0%} of budget)")
+                await self._compress(messages, aggressive=False)
+        except Exception as e:
+            logger.error(f"Compression failed: {e}")
 
     async def _compress(self, messages: list[dict], aggressive: bool = False):
         tail_budget = omega_settings.tail_preserve_tokens
         if aggressive:
-            tail_budget = tail_budget // 2 
-        
+            tail_budget = tail_budget // 2
+
         tail_tokens = 0
         tail_start_idx = len(messages)
         for i in range(len(messages) - 1, -1, -1):
@@ -124,7 +138,9 @@ class SessionManager:
             tail_tokens += msg_tokens
 
         if tail_start_idx <= 1:
-            logger.warning("nothing to compress - tail covers almost entire conversation")
+            logger.warning(
+                "nothing to compress - tail covers almost entire conversation"
+            )
             return
 
         compress_span = messages[:tail_start_idx]
@@ -137,7 +153,9 @@ class SessionManager:
                 pruned_count += 1
 
         conversation_text = self._format_message_for_summary(compress_span)
-        summary = await self.llm_client.generate_answer(COMPRESSION_PROMPT, conversation_text)
+        summary = await self.llm_client.generate_answer(
+            COMPRESSION_PROMPT, conversation_text
+        )
         embedding = self.embedding_service.generate_single_embedding(summary)
 
         await store_memory_entry(
@@ -147,9 +165,11 @@ class SessionManager:
             source_session_id=self.active_session_id,
             metadata={
                 "message_count": len(compress_span),
-                "trigger": "emergency_compression" if aggressive else "standard_compression",
-                "pruned_tool_outputs": pruned_count
-            }
+                "trigger": "emergency_compression"
+                if aggressive
+                else "standard_compression",
+                "pruned_tool_outputs": pruned_count,
+            },
         )
 
         msg_ids = [m["id"] for m in compress_span if "id" in m]

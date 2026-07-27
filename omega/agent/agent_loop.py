@@ -1,95 +1,104 @@
 import json
 import logging
 from omega.llm.client import get_llm_provider
-from omega.agent.tool_registry import ToolExecutor, TOOL_DESC
+from omega.agent.tool_registry import ToolExecutor, TOOLS_OPENAI_FORMAT
+from omega.memory.session_manager import SessionManager
+from omega.memory.loop_detector import LoopDetector
+from omega.memory.context_build import estimate_tokens
 
 logger = logging.getLogger("AgentLoop")
 
-MAX_TOOL_CALLS = 3
+# CLASSIFIER_SYS_PROMPT = """You are Omega's intent classifier. Given a user's request, determine which tool to call
 
-CLASSIFIER_SYS_PROMPT = """You are Omega's intent classifier. Given a user's request, determine which tool to call
+# Availabile tools:
 
-Availabile tools:
+# 1. search_knowledge_base(query)
+#     search saved content to answer a factual question.
+#     This is the DEFAULT - use it for any request seeking an answer, and for ANY ambigious request.
 
-1. search_knowledge_base(query)
-    search saved content to answer a factual question.
-    This is the DEFAULT - use it for any request seeking an answer, and for ANY ambigious request.
+# 2. summarize_item(title_query)
+#     Summarize a specific saved item. ONLY use when user explicitly names an item AND asks for a summary.
 
-2. summarize_item(title_query)
-    Summarize a specific saved item. ONLY use when user explicitly names an item AND asks for a summary.
+# 3. list_recent_items(count, source_type)
+#     List saved items. Use when the user wants to see what they have, not get an answer.
+#     count: number of items (default 10). source_type: optional filter (url/pdf/text/code)
 
-3. list_recent_items(count, source_type)
-    List saved items. Use when the user wants to see what they have, not get an answer.
-    count: number of items (default 10). source_type: optional filter (url/pdf/text/code)
+# 4. get_item_status(title_query)
+#     Check processing status of a named item. Use when the user asks about an item's state.
 
-4. get_item_status(title_query)
-    Check processing status of a named item. Use when the user asks about an item's state.
+# CRITICAL RULE: If a request could plausibly map to more than one tool, you MUST choose search_knowledge_base. Never guess an item identity for summarize_item - only use it when the user clearly names something specific.
 
-CRITICAL RULE: If a request could plausibly map to more than one tool, you MUST choose search_knowledge_base. Never guess an item identity for summarize_item - only use it when the user clearly names something specific.
-
-Respond with ONLY a JSON object:
-{"tool": "tool_name", "arguments": {"key": "value"}}"""
+# Respond with ONLY a JSON object:
+# {"tool": "tool_name", "arguments": {"key": "value"}}"""
 
 class AgentLoop:
     def __init__(self):
-        self.classifier = get_llm_provider()
+        self.llm_client = get_llm_provider()
         self.tool_executor = ToolExecutor()
+        self.session_manager = SessionManager()
+        self.tools_schema_text = json.dumps(TOOLS_OPENAI_FORMAT)
 
     async def process(self, user_message: str) -> dict:
+        await self.session_manager.ensure_session()
+        await self.session_manager.add_message("user", user_message)
+
+        system_context = self.session_manager.system_context
+        conversation = await self.session_manager.get_context_messages()
+        messages = [{"role": "system", "content": system_context}] + conversation
+
         tool_calls_log = []
-        last_error = None
+        all_sources = []
+        loop_detector = LoopDetector()
 
-        for attempt in range(MAX_TOOL_CALLS):
-            classifier_input = user_message
-            if last_error:
-                classifier_input += f"\n\n[Previous attempt failed: {last_error}. Try a different approach.]"
-            
-            intent = await self._classify(classifier_input)
-            logger.info(f"Agent attempt {attempt + 1}: tool={intent['tool']}, args={intent['arguments']}")
+        while True:
+            response = await self.llm_client.chat_with_tools(
+                messages=messages, tools=TOOLS_OPENAI_FORMAT
+            )
 
-            result = await self.tool_executor.execute(intent["tool"], intent["arguments"])
-            tool_calls_log.append({
-                "tool": intent["tool"],
-                "input": intent["arguments"],
-                "result_summary": result.get("result_summary", "no summary")
-            })
-
-            if result["success"]:
+            if not response.tool_calls:
+                answer = response.content or "I'm not sure how to respond to that."
+                await self.session_manager.add_message("assistant", answer)
+                await self.session_manager.check_and_compress(self.tools_schema_text)
                 return {
+                    "session_id": str(self.session_manager.active_session_id),
                     "question": user_message,
-                    "answer": result["answer"],
-                    "sources": result.get("sources", []),
+                    "answer": answer,
+                    "sources": all_sources,
                     "tool_calls": tool_calls_log
                 }
 
-            last_error = result.get("error", "Unknown error")
-            logger.warning(f"Tool '{intent['tool']}' failed: {last_error}")
+            assistant_msg = {"role": "assistant", "content": response.content or ""}
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)}}
+                for tc in response.tool_calls 
+            ]
+            messages.append(assistant_msg)
 
-        return {
-            "question": user_message,
-            "answer": f"I wasn't able to resolve your request after {MAX_TOOL_CALLS} attempts. Last issue: {last_error}. Try being more specific",
-            "sources": [],
-            "tool_calls": tool_calls_log
-        }
-    
-    async def _classify(self, user_message: str) -> dict:
-        try:
-            raw = await self.classifier.generate_json(CLASSIFIER_SYS_PROMPT, user_message)
-            parsed = json.loads(raw)
+            for tc in response.tool_calls:
+                if loop_detector.record_call(tc.name, tc.arguments):
+                    bail = "I noticed I was repeating the same operations. Let me answer with what I have so far"
+                    await self.session_manager.add_message("assistant", bail)
+                    return {
+                        "session_id": str(self.session_manager.active_session_id),
+                        "question": user_message, "answer": bail,
+                        "sources": all_sources, "tool_calls": tool_calls_log
+                    }
 
-            tool = parsed.get("tool", "search_knowledge_base")
-            arguments = parsed.get("arguments", {})
+                logger.info(f"Executing tool: {tc.name}({tc.arguments})")
+                result = await self.tool_executor.execute(tc.name, tc.arguments)
+                tool_calls_log.append({
+                    "tool": tc.name, "input": tc.arguments,
+                    "result_summary": result.get("result_summary", "no summary")
+                })
+                if result.get("sources"):
+                    all_sources.extend(result["sources"])
 
-            if tool not in [t["name"] for t in TOOL_DESC]:
-                logger.warning(f"LLM returned unknown tool '{tool}', falling back to search")
-                tool = "search_knowledge_base"
-                arguments = {"query": user_message}
+                tool_content = result.get("answer", result.get("error", "No result"))
+                await self.session_manager.add_message("tool", tool_content, tool_name=tc.name)
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id, "content": tool_content 
+                })
 
-            return {"tool": tool, "arguments": arguments}
-
-        except (json.JSONDecodeError, Exception) as e:
-            logger.warning(f"Intent classification failed ({e}), defaulting to search")
-            return {
-                "tool": "search_knowledge_base",
-                "arguments": {"query": user_message}
-            }
+    async def new_session(self) -> str:
+        return await self.session_manager.start_new_session()

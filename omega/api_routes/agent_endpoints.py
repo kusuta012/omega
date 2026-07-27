@@ -1,7 +1,6 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from omega.agent import agent_loop
 from omega.agent.agent_loop import AgentLoop
 
 logger = logging.getLogger("AgentEndpoint")
@@ -18,6 +17,7 @@ class ToolCallLog(BaseModel):
     result_summary: str
 
 class AgentResponse(BaseModel):
+    session_id: str
     question: str
     answer: str
     sources: list[dict]
@@ -31,3 +31,8 @@ async def handle_agent_request(req: AgentRequest):
     logger.info(f"Received agent request: '{req.message}'")
     result = await agent_loop.process(req.message)
     return result
+
+@router.post("/new")
+async def start_new_session():
+    session_id = await agent_loop.new_session()
+    return {"message": "New session started", "session_id": str(session_id)}

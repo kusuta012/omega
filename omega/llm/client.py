@@ -5,6 +5,19 @@ from abc import ABC, abstractmethod
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from omega.environment.conf_loader import omega_settings
 import httpx
+from dataclasses import dataclass, field
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+
+@dataclass
+class ChatResponse:
+    content: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str = "stop"
 
 logger = logging.getLogger("LLMProvider")
 
@@ -17,6 +30,12 @@ class LLMProvider(ABC):
     async def generate_json(self, system_prompt: str, user_prompt: str) -> str:
         pass
 
+    @abstractmethod
+    async def chat_with_tools(
+        self, messages: list[dict], tools: list[dict], tool_results: list[dict] | None = None
+    ) -> ChatResponse:
+        pass
+
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(self):
         self.base_url = omega_settings.llm_base_url.rstrip("/")
@@ -26,8 +45,8 @@ class OpenAICompatibleProvider(LLMProvider):
             logger.warning("LLM_API_KEY is missing! llm generation will fail")
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=15),
         retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
         before_sleep=lambda retry_state: logger.warning(f"LLM API error, retrying.. (Attempt {retry_state.attempt_number})")
     )
@@ -97,6 +116,43 @@ class OpenAICompatibleProvider(LLMProvider):
         
         raise ValueError(f"Failed to generate parseable JSON, raw output {content}")
 
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict], tool_results: list[dict] | None = None) -> ChatResponse:
+        all_messages = list(messages)
+        if tool_results:
+            for tr in tool_results:
+                all_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tr["tool_call_id"],
+                    "content": tr["content"]
+                })
+            
+        payload = {
+            "model": self.model,
+            "messages": all_messages,
+            "temperature": 0.3,
+            "max_tokens": 2048
+        }
+        if tools:
+            payload["tools"] = tools
+
+        data = await self._call_api(payload)
+        msg = data["choices"][0]["message"]
+
+        tool_calls = []
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                tool_calls.append(ToolCall(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    arguments=json.loads(tc["function"]["arguments"])
+                ))
+
+        return ChatResponse(
+            content=msg.get("content"),
+            tool_calls=tool_calls,
+            finish_reason=data["choices"][0].get("finish_reason", "stop")
+        )
+
 class AnthropicProvider(LLMProvider):
     def __init__(self):
         self.api_key = omega_settings.llm_api_key
@@ -156,6 +212,68 @@ class AnthropicProvider(LLMProvider):
         )
         json.loads(content)
         return content
+
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict], tool_results: list[dict] | None = None) -> ChatResponse:
+        anthropic_tools = []
+        for t in tools:
+            anthropic_tools.append({
+                "name": t["function"]["name"],
+                "description": t["function"].get("description", ""),
+                "input_schema": t["function"].get("parameters", {"type": "object", "properties": {}})
+            })
+
+        system_text = None
+        anthropic_msgs = []
+        for m in messages:
+            if m["role"] == "system":
+                system_text = m["content"]
+            elif m["role"] == "tool":
+                anthropic_msgs.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": m.get("tool_call_id", "unknown"),
+                        "content": m["content"]
+                    }]
+                })
+            else:
+                anthropic_msgs.append({"role": m["role"], "content": m["content"]})
+
+        if tool_results:
+            tool_result_blocks = []
+            for tr in tool_results:
+                tool_result_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tr["tool_call_id"],
+                    "content": tr["content"]
+                })
+            anthropic_msgs.append({"role": "user", "content": tool_result_blocks})
+
+        payload = {
+            "model": self.model,
+            "messages": anthropic_msgs,
+            "temperature": 0.3,
+            "max_tokens": 2048
+        }
+        if system_text:
+            payload["system"] = system_text
+        if anthropic_tools:
+            payload["tools"] = anthropic_tools
+
+        data = await self._call_api(payload)
+        content_text = None
+        tool_calls = []
+        for block in data["content"]:
+            if block["type"] == "text":
+                content_text = block["text"]
+            elif block["type"] == "tool_use":
+                tool_calls.append(ToolCall(
+                    id=block["id"],
+                    name=block["name"],
+                    arguments=block["input"]
+                ))
+
+        return ChatResponse(content=content_text, tool_calls=tool_calls, finish_reason=data.get("stop_reason", "end_turn"))
 
 def get_llm_provider() -> LLMProvider:
     provider_type = omega_settings.llm_provider.lower()

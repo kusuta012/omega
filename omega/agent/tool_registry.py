@@ -41,6 +41,66 @@ TOOL_DESC = [
     }
 ]
 
+TOOLS_OPENAI_FORMAT = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": "Search the user's saved knowledge base to answer a factual question. This is the DEFAULT tool , use it for any request that seek an answer from saved content, and for any ambiguous request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The natural language search query"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_item",
+            "description": "Summarize a specific saved item. ONLY use when the user explicitly names a particular item and asks for a summary or overview of it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title_query": {"type": "string", "description": "The title or identifying name of the item to summarize"}
+                },
+                "required": ["title_query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_recent_items",
+            "description": "List items saved in the knowledge base. Use when the user wants to browse or see what they have saved, not when they want an answer to a question",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer", "description": "Number of items to return (default 10)"},
+                    "source_type": {"type": "string", "description": "Optional filters: url, pdf, text, code", "enum": ["url", "pdf", "text", "code"]}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_item_status",
+            "description": "Check the processing status of a specific item. Use when the user asks whether an item has finished processing or wants to know its current state",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title_query": {"type": "string", "description": "The title or identifying name of the item to check"}
+                },
+                "required": ["title_query"]
+            }
+        }
+    }
+]
+
 SUMMARIZE_SYSTEM_PROMPT = """You are Omega, a factual summarization assistant.
 Summarize the following document concisely. Capture the key points, main arguments and important details.
 Keep your summary strictly factual - do not add information not present in the text.
