@@ -2,7 +2,7 @@ import logging
 import json
 import re
 from abc import ABC, abstractmethod
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, retry_if_exception_type
 from omega.environment.conf_loader import omega_settings
 import httpx
 from dataclasses import dataclass, field
@@ -36,6 +36,12 @@ class LLMProvider(ABC):
     ) -> ChatResponse:
         pass
 
+def is_retryable_http_error(exception):
+    """Don't retry HTTP 400 or 404 errors - they are client errors like missing tool support."""
+    if isinstance(exception, httpx.HTTPStatusError):
+        return exception.response.status_code not in (400, 404)
+    return isinstance(exception, httpx.RequestError)
+
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(self):
         self.base_url = omega_settings.llm_base_url.rstrip("/")
@@ -47,14 +53,22 @@ class OpenAICompatibleProvider(LLMProvider):
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=2, max=15),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        retry=retry_if_exception(is_retryable_http_error),
         before_sleep=lambda retry_state: logger.warning(f"LLM API error, retrying.. (Attempt {retry_state.attempt_number})")
     )
+
     async def _call_api(self, payload: dict) -> dict:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
+
+        if "openrouter.ai" in self.base_url.lower():
+            if omega_settings.openrouter_app_url:
+                headers["HTTP-Referer"] = omega_settings.openrouter_app_url
+            if omega_settings.openrouter_app_title:
+                headers["X-Title"] = omega_settings.openrouter_app_title
+
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
             response.raise_for_status()
@@ -135,7 +149,18 @@ class OpenAICompatibleProvider(LLMProvider):
         if tools:
             payload["tools"] = tools
 
-        data = await self._call_api(payload)
+        try:
+            data = await self._call_api(payload)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (400, 404) and tools:
+                logger.error(f"Tool calling failed ({e.response.status_code}). Likely unspported model: {e.response.text}")
+                return ChatResponse(
+                    content="Error: The currently selected LLM model does not support native tool-calling. Please switch to a supported model.",
+                    tool_calls=[],
+                    finish_reason="stop"
+                )
+            raise e
+            
         msg = data["choices"][0]["message"]
 
         tool_calls = []
