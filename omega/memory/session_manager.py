@@ -91,7 +91,7 @@ class SessionManager:
             content=summary,
             embedding=embedding,
             source_session_id=session_id,
-            metadata={"message_count": len(messages), "trigger": "session_close"},
+            metadata={"message_count": len(messages), "trigger": trigger},
         )
         logger.info(
             f"Created session summary for {session_id} ({len(messages)} messages)"

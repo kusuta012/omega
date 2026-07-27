@@ -1,4 +1,4 @@
-import json as _json
+import json
 import logging
 from omega.storage.postgres_session import db_pool
 
@@ -129,8 +129,8 @@ async def store_extracted_fact(
     supersedes_id: str = None,
     metadata: dict = None
 ) -> str:
-    embedding_json = _json.dumps(embedding)
-    metadata_json = _json.dumps(metadata) if metadata else None
+    embedding_json = json.dumps(embedding)
+    metadata_json = json.dumps(metadata) if metadata else None
 
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -142,14 +142,14 @@ async def store_extracted_fact(
             """, content, embedding_json, source_session_id, occurred_at, importance, metadata_json, supersedes_id)
 
             if supersedes_id:
-                await conn.excute("""
+                await conn.execute("""
                     UPDATE memory_entries SET superseded_by = $1 WHERE id = $2
                 """, entry_id, supersedes_id)
     logger.info(f"Stored extracted fact {entry_id} (supersedes={supersedes_id})")
     return entry_id
 
 async def find_similar_facts(embedding: list[float], limit: int = 3) -> list[dict]:
-    embedding_json = _json.dumps(embedding)
+    embedding_json = json.dumps(embedding)
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, content, importance,
@@ -158,10 +158,11 @@ async def find_similar_facts(embedding: list[float], limit: int = 3) -> list[dic
             WHERE memory_type = 'extracted_fact' AND superseded_by IS NULL
               AND embedding <=> $1::vector < 0.5
             ORDER BY embedding <=> $1::vector
+            LIMIT $2
         """, embedding_json, limit)
     return [dict(r) for r in rows]
 
-async def get_uncosolidated_count() -> int:
+async def get_unconsolidated_count() -> int:
     async with db_pool.acquire() as conn:
         count = await conn.fetchval("""
             SELECT COUNT(*) FROM memory_entries
@@ -200,6 +201,6 @@ async def upsert_user_profile(trait_key: str, trait_value: str, confidence: floa
             VALUES ($1, $2, $3, now())
             ON CONFLICT (trait_key) DO UPDATE SET
                 trait_value = $2,
-                confidence = $3.
+                confidence = $3,
                 updated_at = now()
         """, trait_key, trait_value, confidence)

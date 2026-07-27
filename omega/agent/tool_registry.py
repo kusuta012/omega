@@ -139,7 +139,7 @@ class ToolExecutor:
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         executors = {
             "search_knowledge_base": self._search,
-            "search_memory": self._search_memory_tool,
+            "search_memory": self._search_memory,
             "summarize_item": self._summarize,
             "list_recent_items": self._list_items,
             "get_item_status": self._get_status
