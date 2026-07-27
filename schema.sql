@@ -55,7 +55,8 @@ CREATE TABLE messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     tool_name TEXT,
-    created_at TIMESTAMP DEFAULT now()
+    created_at TIMESTAMP DEFAULT now(),
+    compressed BOOLEAN DEFAULT FALSE
 );
 
 CREATE TABLE memory_entries (
@@ -74,4 +75,4 @@ CREATE TABLE memory_entries (
 
 CREATE INDEX idx_messages_session ON messages(session_id, created_at);
 CREATE INDEX idx_memory_type_date ON memory_entries(memory_type, occurred_at);
-CREATE INDEX idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);,

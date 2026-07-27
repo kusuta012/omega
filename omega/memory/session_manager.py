@@ -8,6 +8,7 @@ from omega.storage.memory_queries import (
     store_memory_entry,
     mark_messages_compressed,
     get_message_span,
+    find_orphaned_sessions
 )
 from omega.memory.context_build import estimate_tokens, build_system_context
 from omega.memory.core import ensure_memory_dir
@@ -47,7 +48,7 @@ class SessionManager:
     async def ensure_session(self) -> str:
         if self.active_session_id:
             return self.active_session_id
-
+        await self._recover_orphaned_sessions()
         self.active_session_id = await create_session()
         self.system_context = await build_system_context()
         logger.info(f"Session started: {self.active_session_id}")
@@ -78,7 +79,7 @@ class SessionManager:
         self.active_session_id = None
         self.system_context = None
 
-    async def _create_session_summary(self, messages: list[dict]):
+    async def _create_session_summary_for(self, session_id: str, messages: list[dict], trigger: str = "session_close"):
         conversation_text = self._format_message_for_summary(messages)
         summary = await self.llm_client.generate_answer(
             SESSION_CLOSE_PROMPT, conversation_text
@@ -89,12 +90,15 @@ class SessionManager:
             memory_type="session_summary",
             content=summary,
             embedding=embedding,
-            source_session_id=self.active_session_id,
+            source_session_id=session_id,
             metadata={"message_count": len(messages), "trigger": "session_close"},
         )
         logger.info(
-            f"Created session summary for {self.active_session_id} ({len(messages)} messages)"
+            f"Created session summary for {session_id} ({len(messages)} messages)"
         )
+
+    async def _create_session_summary(self, messages: list[dict]):
+        await self._create_session_summary_for(self.active_session_id, messages, trigger="session_close")
 
     async def add_message(self, role: str, content: str, tool_name: str = None):
         await append_message(self.active_session_id, role, content, tool_name)
@@ -190,3 +194,24 @@ class SessionManager:
                 role = f"TOOL({m['tool_name']})"
             lines.append(f"[{role}]: {content}")
         return "\n".join(lines)
+
+    async def _recover_orphaned_sessions(self):
+        orphans = await find_orphaned_sessions()
+        if not orphans:
+            return
+
+        for orphan in orphans:
+            orphan_id = orphan["id"]
+            logger.warning(f"found orphaned session {orphan_id} - attempting crash recovery summary")
+            try:
+                messages = await get_session_messages(orphan_id)
+                if len(messages) >= 2:
+                    await self._create_session_summary_for(orphan_id, messages, trigger="crash_recovery")
+                    logger.info(f"Crash recovery: created summary for orphaned session {orphan_id}")
+                else:
+                    logger.info(f"Crash recovery: orphaned session {orphan_id} had <2 messages, skipping summary")
+            except Exception as e:
+                logger.error(f"Crash recovery: failed to summarize orphaned session {orphan_id}: {e}")
+
+            await close_session(orphan_id)
+            logger.info(f"Crash recovery closed orphaned session {orphan_id}")

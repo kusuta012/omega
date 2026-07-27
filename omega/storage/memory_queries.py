@@ -22,6 +22,13 @@ async def get_active_session():
             "SELECT id, started_at FROM sessions WHERE status = 'active' ORDER BY started_at DESC LIMIT 1"
         )
 
+async def find_orphaned_sessions() -> list[dict]:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, started_at FROM sessions WHERE status = 'active' ORDER BY started_at ASC"
+        )
+    return [dict(r) for r in rows]
+
 async def close_session(session_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -39,13 +46,20 @@ async def append_message(session_id: str, role: str, content: str, tool_name: st
 
 # Hello unc reviewer, don't be too lazy to review projects
 
-async def get_session_messages(session_id: str) -> list[dict]:
+async def get_session_messages(session_id: str, include_compressed: bool = False) -> list[dict]:
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, role, content, tool_name, created_at FROM messages "
-            "WHERE session_id = $1 ORDER BY created_at ASC",
-            session_id
-        )
+        if include_compressed:
+            rows = await conn.fetch(
+                "SELECT id, role, content, tool_name, created_at FROM messages "
+                "WHERE session_id = $1 ORDER BY created_at ASC",
+                session_id
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT id, role, content, tool_name, created_at FROM messages "
+                "WHERE session_id = $1 AND compressed = FALSE ORDER BY created_at ASC",
+                session_id
+            )
     return [dict(r) for r in rows]
 
 async def get_message_span(session_id: str, before_timestamp) -> list[dict]:
@@ -60,7 +74,7 @@ async def get_message_span(session_id: str, before_timestamp) -> list[dict]:
 async def mark_messages_compressed(message_ids: list[str]):
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM messages WHERE id = ANY($1::uuid[])",
+            "UPDATE messages SET compressed = TRUE WHERE id = ANY($1::uuid[])",
             message_ids
         )
 

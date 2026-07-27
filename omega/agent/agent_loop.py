@@ -8,6 +8,7 @@ from omega.memory.context_build import estimate_tokens
 
 logger = logging.getLogger("AgentLoop")
 
+MAX_TOOL_ROUNDS_PER_TURN = 5
 # CLASSIFIER_SYS_PROMPT = """You are Omega's intent classifier. Given a user's request, determine which tool to call
 
 # Availabile tools:
@@ -49,6 +50,7 @@ class AgentLoop:
         tool_calls_log = []
         all_sources = []
         loop_detector = LoopDetector()
+        tool_round = 0
 
         while True:
             response = await self.llm_client.chat_with_tools(
@@ -67,6 +69,18 @@ class AgentLoop:
                     "tool_calls": tool_calls_log
                 }
 
+            tool_round += 1
+            if tool_round > MAX_TOOL_ROUNDS_PER_TURN:
+                bail = f"I've reached my limit of {MAX_TOOL_ROUNDS_PER_TURN} tool-calling rounds. Let me answer with what I have"
+                logger.warning(f"Hard tool-round cap hit {MAX_TOOL_ROUNDS_PER_TURN} for message: {user_message[:80]}")
+                await self.session_manager.add_message("assistant", bail)
+                await self.session_manager.check_and_compress(self.tools_schema_text)
+                return {
+                    "session_id": str(self.session_manager.active_session_id),
+                    "question": user_message, "answer": bail,
+                    "sources": all_sources, "tool_calls": tool_calls_log
+                }
+
             assistant_msg = {"role": "assistant", "content": response.content or ""}
             assistant_msg["tool_calls"] = [
                 {"id": tc.id, "type": "function",
@@ -75,10 +89,17 @@ class AgentLoop:
             ]
             messages.append(assistant_msg)
 
+            tool_decision_text = response.content or ""
+            tool_names = [tc.name for tc in response.tool_calls]
+            if not tool_decision_text:
+                tool_decision_text = f"[Calling tools: {', '.join(tool_names)}]"
+            await self.session_manager.add_message("assistant", tool_decision_text)
+
             for tc in response.tool_calls:
                 if loop_detector.record_call(tc.name, tc.arguments):
                     bail = "I noticed I was repeating the same operations. Let me answer with what I have so far"
                     await self.session_manager.add_message("assistant", bail)
+                    await self.session_manager.check_and_compress(self.tools_schema_text)
                     return {
                         "session_id": str(self.session_manager.active_session_id),
                         "question": user_message, "answer": bail,
