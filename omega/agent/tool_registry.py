@@ -59,6 +59,20 @@ TOOLS_OPENAI_FORMAT = [
     {
         "type": "function",
         "function": {
+            "name": "search_memory",
+            "description": "Search BOTH the knowledge base AND the agent's own memory of past conversations. Use this when you need to find something that might be in saved documents OR something the user you in a previous conversation. Always labels results by source (document vs memory)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The natural language search query"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "summarize_item",
             "description": "Summarize a specific saved item. ONLY use when the user explicitly names a particular item and asks for a summary or overview of it.",
             "parameters": {
@@ -125,6 +139,7 @@ class ToolExecutor:
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         executors = {
             "search_knowledge_base": self._search,
+            "search_memory": self._search_memory_tool,
             "summarize_item": self._summarize,
             "list_recent_items": self._list_items,
             "get_item_status": self._get_status
@@ -176,11 +191,33 @@ class ToolExecutor:
             return {"success": False, "error": "No item specified", "result_summary": "Empty title query"}
 
         matches = await resolve_item_by_title(title_query)
+
         if not matches:
+            logger.info(f"no ILIKE match for '{title_query}', falling back to semantic search")
+            semantic_results = await self.synthesis.search_knowledge(title_query, top_k=3)
+            if semantic_results:
+                top_result = semantic_results[0]
+                item_id = top_result["item_id"]
+                item_title = top_result["source_title"] or "Untitled"
+                logger.info(f"semantic fallback: resolved {title_query} to '{item_title}' ({item_id})")
+                item = await fetch_item_by_id(item_id)
+                if item and item.get("raw_content"):
+                    content = item["raw_content"]
+                    if len(content) > 12000:
+                        content = content[:12000] + "\n\n[content truncated for summarization]"
+                    user_prompt = f"DOCUMENT TITLE: {item_title}\n\nDOCUMENT CONTENT:\n{content}\n\nSUMMARY"
+                    summary = await self.llm_client.generate_answer(SUMMARIZE_SYSTEM_PROMPT, user_prompt)
+                    note = f"\n\n[Note: no item matched '{title_query}' exactly, But I found this similar item '{item_title}']"
+                    return{
+                        "success": True,
+                        "answer": summary + note,
+                        "sources": [{"title": item_title, "item_id": str(item_id), "match_type": "semantic_fallback"}],
+                        "result_summary": f"semantic fallback: summarized '{item_title}' matched from '{title_query}'"
+                    }
             return {
                 "success": False,
-                "error": f"No item found matching '{title_query}'",
-                "result_summary": f"Title lookup for '{title_query}' returned 0 results"
+                "error": f"No item found matching '{title_query}', tried exact match and semantic search",
+                "result_summary": f"Title and semantic lookup for '{title_query}' returned 0 results"
             }
 
         ambiguity_note = ""
@@ -260,10 +297,34 @@ class ToolExecutor:
 
         matches = await resolve_item_by_title(title_query)
         if not matches:
+            logger.info(f"No exact match for '{title_query}' in get_item_status, falling back to semantic search")
+            semantic_results = await self.synthesis.search_knowledge(title_query, top_k=3)
+            if semantic_results:
+                top_result = semantic_results[0]
+                item_id = top_result["item_id"]
+                item_title = top_result["source_title"] or "Untitled"
+                detail = await get_item_detail(item_id)
+                if detail:
+                    item = detail["item"]
+                    jobs = detail["jobs"]
+                    status_line = f"'{item['title']}' (semantically matched from '{title_query}'), status: {item['status'].upper()}"
+                    if jobs:
+                        latest_job = jobs[0]
+                        status_line += f"\nLatest job: {latest_job['status']} attempt {latest_job['attempts']}"
+                        if latest_job["last_error"]:
+                            status_line += f"\nLast error: {latest_job["last_error"]}"
+                    status_line += f"\nChunks: {len(detail['chunks'])}"
+                    status_line += f"\nNote: no item name '{title_query}' exactly, but found this similar item"
+                    return {
+                        "success": True,
+                        "answer": status_line,
+                        "sources": [{"title": item_title, "item_id": str(item_id), "match_type": "semantic_fallback"}],
+                        "result_summary": f"semantic fallback: status check for '{item_title}' matched from '{title_query}'"
+                    }
             return {
                 "success": False,
-                "error": f"No item found matching '{title_query}'",
-                "result_summary": f"Title lookup for '{title_query}' returned 0 results"
+                "error": f"No item found matching '{title_query}' tried exact match and semantic search",
+                "result_summary": f"Title and semantic lookup for '{title_query}' returned 0 results"
             }
 
         ambiguity_note = ""
@@ -299,4 +360,29 @@ class ToolExecutor:
             "answer": status_line,
             "sources": [{"title": item["title"], "item_id": str(item_id)}],
             "result_summary": result_summary
+        }
+    
+    async def _search_memory(self, args: dict) -> dict:
+        query = args.get("query", "")
+        if not query:
+            return {"success": False, "error": "no query provided", "results_summary": "Empty query"}
+
+        result = await self.synthesis.answer_with_memory(query, top_k=5)
+
+        if not result.get("sources"):
+            return {
+                "success": True,
+                "answer": "I searched both your knowledge base and memory but found nothing relevant",
+                "sources": [],
+                "result_summary": "unified search returned 0 results across KB + memory"
+            }
+
+        kb_count = sum(1 for s in result["sources"] if s.get("source_type") == "knowledge_base")
+        mem_count = sum(1 for s in result["sources"] if s.get("source_type") == "memory")
+
+        return {
+            "success": True,
+            "answer": result["answer"],
+            "sources": result["sources"],
+            "result_summary": f"unified search: {kb_count} KB sources + {mem_count} memory entries"
         }

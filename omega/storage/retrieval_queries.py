@@ -4,6 +4,31 @@ import logging
 
 logger = logging.getLogger("RetrievalQueries")
 
+async def search_memory_entries(query_text: str, query_embedding: list[float], top_k: int = 5) -> list[dict]:
+    embedding_json = json.dumps(query_embedding)
+    query = """
+        SELECT
+            id, memory_type, content, importance, access_count,
+            created_at, source_session_id, metadata, superseded_by,
+            (1 - (embedding <=> $1::vector)) as semantic_score,
+            GREATEST(0.0, EXP(-0.02 * EXTRACT(EPOCH FROM (now() - created_at)) / 86400.0)) as recency_score,
+            (
+                (1 - (embedding <=> $1::vector)) * 1.0 +
+                GREATEST(0.0, EXP(-0.02 * EXTRACT(EPOCH FROM (now() - created_at)) / 86400.0)) * 1.0 +
+                COALESCE(importance, 0.5) * 1.0 +
+                LN(COALESCE(access_count, 0) + 1) * 1.0
+            ) as composite_score
+        FROM memory_entries
+        WHERE superseded_by IS NULL
+          AND embedding <=> $1::vector < 1.5
+        ORDER BY composite_score DESC
+        LIMIT $2
+    """
+
+    async with db_pool.acquire() as conn:
+        records = await conn.fetch(query, embedding_json, top_k)
+    return [dict(r) for r in records]
+
 async def search_hybrid_chunks(query_text: str, query_embedding: list[float], top_k: int = 5, distance_threshold: float = 0.6, min_rrf_score: float = 0.01, min_keyword_rank: float = 0.05):
     embedding_json = json.dumps(query_embedding)
     hybrid_query = """
