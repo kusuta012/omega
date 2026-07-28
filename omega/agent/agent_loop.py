@@ -5,6 +5,7 @@ from omega.agent.tool_registry import ToolExecutor, TOOLS_OPENAI_FORMAT
 from omega.memory.session_manager import SessionManager
 from omega.memory.loop_detector import LoopDetector
 from omega.memory.context_build import estimate_tokens
+from omega.memory.consolidation import get_consolidation_job
 
 logger = logging.getLogger("AgentLoop")
 
@@ -61,6 +62,7 @@ class AgentLoop:
                 answer = response.content or "I'm not sure how to respond to that."
                 await self.session_manager.add_message("assistant", answer)
                 await self.session_manager.check_and_compress(self.tools_schema_text)
+                await self._maybe_consolidate()
                 return {
                     "session_id": str(self.session_manager.active_session_id),
                     "question": user_message,
@@ -75,6 +77,7 @@ class AgentLoop:
                 logger.warning(f"Hard tool-round cap hit {MAX_TOOL_ROUNDS_PER_TURN} for message: {user_message[:80]}")
                 await self.session_manager.add_message("assistant", bail)
                 await self.session_manager.check_and_compress(self.tools_schema_text)
+                await self._maybe_consolidate()
                 return {
                     "session_id": str(self.session_manager.active_session_id),
                     "question": user_message, "answer": bail,
@@ -100,6 +103,7 @@ class AgentLoop:
                     bail = "I noticed I was repeating the same operations. Let me answer with what I have so far"
                     await self.session_manager.add_message("assistant", bail)
                     await self.session_manager.check_and_compress(self.tools_schema_text)
+                    await self._maybe_consolidate()
                     return {
                         "session_id": str(self.session_manager.active_session_id),
                         "question": user_message, "answer": bail,
@@ -123,3 +127,10 @@ class AgentLoop:
 
     async def new_session(self) -> str:
         return await self.session_manager.start_new_session()
+
+    async def _maybe_consolidate(self):
+        try:
+            job = get_consolidation_job()
+            await job.trigger_if_needed()
+        except Exception as e:
+            logger.error(f"consolidation trigger failed: {e}")

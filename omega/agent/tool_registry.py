@@ -1,11 +1,14 @@
 import logging
+import json
 from omega.rag.synthesis import Synthesis
 from omega.storage.management_queries import (
     list_items_paginated, get_item_detail
 )
 from omega.storage.item_queries import fetch_item_by_id
+from omega.storage.memory_queries import store_extracted_fact, find_similar_facts
 from omega.storage.postgres_session import db_pool
 from omega.llm.client import get_llm_provider
+from omega.embeddings.embedding_service import EmbeddingService
 
 logger = logging.getLogger("ToolRegistry")
 
@@ -112,6 +115,18 @@ TOOLS_OPENAI_FORMAT = [
                 "required": ["title_query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": "SAVE something important the user just told you about themselves - a stated preference, a personal fact, a notable life event, a goal. ONLY use this for durable, personal information the user directly shared in this conversation. Do NOT use for routine chat, questions, or content from saved documents. Before saving, think: will this still matter in a week?",
+            "parameters": {
+                "fact": {"type": "string", "description": "The specific fact to remember, stated clearly as a standalone sentence (e.g 'The user prefers dark mode in all applications')"},
+                "importance": {"type": "number", "description": "How important this fact is (0.0-1.0), Default 0.7 for preferences, 0.9 for major life events, 0.5 for minor notes."}
+            },
+            "required": ["fact"]
+        }
     }
 ]
 
@@ -135,6 +150,7 @@ class ToolExecutor:
     def __init__(self):
         self.synthesis = Synthesis()
         self.llm_client = get_llm_provider()
+        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
 
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         executors = {
@@ -142,7 +158,8 @@ class ToolExecutor:
             "search_memory": self._search_memory,
             "summarize_item": self._summarize,
             "list_recent_items": self._list_items,
-            "get_item_status": self._get_status
+            "get_item_status": self._get_status,
+            "remember": self._remember,
         }
 
         executor = executors.get(tool_name)
@@ -386,3 +403,84 @@ class ToolExecutor:
             "sources": result["sources"],
             "result_summary": f"unified search: {kb_count} KB sources + {mem_count} memory entries"
         }
+
+    async def _remember(self, args: dict) -> dict:
+        fact = args.get("fact", "").strip()
+        if not fact:
+            return {"success": False, "error": "No fact provided", "result_summary": "Empty fact"}
+
+        importance = float(args.get("importance", 0.7))
+        importance = max(0.0, min(1.0, importance))
+
+        embedding = self.embedding_service.generate_single_embedding(fact)
+        supersedes_id = None
+        try:
+            similar = await find_similar_facts(embedding, limit=3)
+            if similar:
+                supersedes_id = await self._check_contradiction(fact, similar)
+        except Exception as e:
+            logger.warning(f"Superseding check failed (non-fatal): {e}")
+
+        try:
+            entry_id = await store_extracted_fact(
+                content=fact,
+                embedding=embedding,
+                source_session_id=None,
+                importance=importance,
+                supersedes_id=supersedes_id,
+                metadata={"source": "remember_tool"},
+            )
+        except Exception as e:
+            logger.error(f"Failed to store extracted fact: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to save: {e}",
+                "result_summary": f"remember tool failed: {e}"
+            }
+        
+        superseded_note = ""
+        if supersedes_id:
+            supersedes_note = " (updated a previous memory)"
+
+        return {
+            "success": True,
+            "answer": f"I'll remember that{superseded_note}.",
+            "sources": [],
+            "result_summary": f"stored fact (importance={importance:.1f}){superseded_note}",
+            "memory_entry_id": str(entry_id),
+        }
+
+    async def _check_contradiction(self, new_fact: str, similar: list[dict]) -> str | None:
+        existing_text = "\n".join(
+            f"Existing {i+1} (id={e['id']}, similarity={e.get('similarity', 0):.2f}): {e['content']}"
+            for i, e in enumerate(similar)
+        )
+
+        prompt = f"""You are a fact checker. A user has started a new fact that is semantically similar
+to existing stored facts. Determine if the new fact CONTRADICTS or SUPERSEDES any existing fact.
+
+A contradiction means: if the new fact is true, the old fact must be false.
+The user's current statement should be trusted as the most recent truth.
+e.g: old="User likes ice cream", new="User no longer likes ice cream" -> CONTRADICTION (the old is now wrong)
+
+If the new fact contradicts an existing one, return the ID of the contradicted entry.
+If they are consistent or about different things, return null.
+
+NEW FACT: {new_fact}
+
+EXISTING FACTS:
+{existing_text}
+
+Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id": null}}"""
+
+        try:
+            response = await self.llm_client.generate_json(prompt, "")
+            result = json.loads(response)
+            sid = result.get("supersedes_id")
+            if sid:
+                logger.info(f"belief superseding: new fact contradicts {sid}")
+                return sid
+        except Exception as e:
+            logger.warning(f"contradiction check LLM call failed: {e}")
+
+        return None
