@@ -74,6 +74,7 @@ class ConsolidationJob:
         entry_ids = [e["id"] for e in entries]
         await self._decay_stale_entries(entries)
         merge_map = await self._find_merges(entries)
+        await self._apply_merges(merge_map)
         pattern_result = await self._identify_patterns_and_core(entries, merge_map)
         core_ids = pattern_result.get("core_entry_ids", [])
         await self._write_memory_md(entries, core_ids, merge_map)
@@ -119,7 +120,7 @@ class ConsolidationJob:
             logger.info(f"decaying importance on {len(stale_ids)} stale entries")
             await apply_importance_decay(stale_ids, DECAY_FACTOR)
             
-    async def _find_merges(self, entries: list[dict]) -> dict[str, str]:
+    async def _find_merges(self, entries: list[dict]) -> dict[str, set[str]]:
         merge_map = {}
         already_merged = set()
 
@@ -169,8 +170,25 @@ class ConsolidationJob:
         
         return merge_map
 
+    async def _apply_merges(self, merge_map: dict[str, set[str]]):
+        if not merge_map:
+            return
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                for keeper_id, merged_ids in merge_map.items():
+                    for merged_id in merged_ids:
+                        await conn.execute(
+                            "UPDATE memory_entries SET superseded_by = $1 WHERE id = $2",
+                            keeper_id, merged_id
+                        )
+                        logger.info(f"merge: entry {merged_id} superseded by {keeper_id}")
+
+        total = sum(len(v) for v in merge_map.values())
+        logger.info(f"applied {total} merge supersedings across {len(merge_map)} groups")
+
     async def _identify_patterns_and_core(
-        self, entries: list[dict], merge_map: dict[str, str]
+        self, entries: list[dict], merge_map: dict[str, set[str]]
     ) -> dict:
         keeper_ids = set(merge_map.keys())
         merged_ids = set()
@@ -210,7 +228,7 @@ class ConsolidationJob:
             return {"patterns": ["LLM pattern extraction failed"], "core_entry_ids": []}
 
     async def _write_memory_md(
-        self, entries: list[dict], core_ids: list[str], merge_map: dict[str, str]
+        self, entries: list[dict], core_ids: list[str], merge_map: dict[str, set[str]]
     ):
         id_to_entry = {e["id"]: e for e in entries}
 
