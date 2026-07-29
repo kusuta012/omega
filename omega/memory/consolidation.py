@@ -7,7 +7,8 @@ from omega.storage.memory_queries import (
     get_unconsolidated_count,
     mark_entries_consolidated,
     apply_importance_decay,
-    get_user_profile_rows
+    get_user_profile_rows,
+    count_total_msgs
 )
 from omega.storage.retrieval_queries import search_memory_entries
 from omega.storage.postgres_session import db_pool
@@ -15,6 +16,7 @@ from omega.embeddings.embedding_service import EmbeddingService
 from omega.llm.client import get_llm_provider
 from omega.memory.core import read_memory_md, read_user_md
 from omega.environment.conf_loader import omega_settings
+from omega.memory.profile_infer import (safe_auto_write, append_to_profile_file)
 
 logger = logging.getLogger("Consolidation")
 
@@ -25,7 +27,7 @@ DECAY_FACTOR = 0.95
 DECAY_FLOOR = 0.05
 CORE_MEMORY_MAX_ENTRIES = 15
 
-PATTERN_PROMPT = f"""You are Omega's memory curator. Review these recent memory entries
+PATTERN_PROMPT = """You are Omega's memory curator. Review these recent memory entries
 (session summaries and extracted facts) and identify TWO things:
 
 1. RECURRING PATTERNS: Any themes, topics, or behaviors that appear across multiple entries.
@@ -40,9 +42,49 @@ PATTERN_PROMPT = f"""You are Omega's memory curator. Review these recent memory 
 Return ONLY a JSON object with this exact structure (no explanations, no markdown):
 {
     "patterns": ["pattern 1", "pattern 2"],
-    "core_entry_ids:" ["uuid1", "uuid2", "uuid3"]
+    "core_entry_ids": ["uuid1", "uuid2", "uuid3"]
 }"""
 
+PROFILE_PROMPT = """You are omega's profile curator. Review the recent session below and identify any new information about the USER that should be added to USER.md
+Your notes about who the user is and how to interact with them.
+
+USER.md should contain:
+- Identity: name, role, background - anything the user has revealed about themselves
+- Communication style: how the user talks, their tone, verbosity preference
+- Preferences: how they like you to respond, what they value
+- Work context: what they're working on, their ambitions
+- Life: how they've been recently, what their day looks like
+- Constraints: anything you should avoid or be aware of
+
+CURRENT USER.md:
+{current_user_md}
+
+RECENT SESSION:
+{recent_session}
+
+Based on these sessions, what NEW information (not already in USER.md) should be added?
+Focus on durable observations - communication patterns seen across multiple sessions,
+identify details the user has shared, or explicit preferences they've stated.
+
+If nothing new should be added, return an empty updates list.
+
+Return ONLY a JSON object with this structure:
+{
+    "updates": [
+        {
+            "section_title": "Communication Style",
+            "content": "The user consistently sends very short, direct messages. They prefer brief answers and seem to get annoyed by long explanations. Keep responses to 1-3 sentences unless asked for detail"
+        }
+    ],
+    "observations": "Brief note about overall communication patterns observed"
+}
+
+Rules:
+- Each update should be a natural-language note to yourself, not structured data
+- Only propose updates when you see clear, consistent patterns.
+- Don't repeat information already in USER.md
+- Write as notes to yourself: "The user prefers...", "User mentioned...", "User works with..."
+- If nothing clear, return empty updates list"""
 
 class ConsolidationJob:
     def __init__(self):
@@ -88,7 +130,8 @@ class ConsolidationJob:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT id, memory_type, content, embedding::text, importance,
-                       access_count, last_accessed_at, created_at, metadata
+                       access_count, last_accessed_at, created_at, metadata,
+                       source_session_id
                 FROM memory_entries
                 WHERE (metadata->>'consolidated' IS NULL
                        OR metadata->>'consolidated' = 'false')
@@ -267,42 +310,136 @@ class ConsolidationJob:
         if count == 0:
             lines.append("_No core memories yet_")
 
-        path = Path(omega_settings.memory_dir) / "MEMORY.md"
+        content = "\n".join(lines)
+        memory_dir = Path(omega_settings.memory_dir)
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        memory_path = memory_dir / "MEMORY.md"
+
         old_content = ""
-        if path.exists():
-            old_content = path.read_text()
+        if memory_path.exists():
+            old_content = memory_path.read_text()
 
-        new_content = "\n".join(lines)
-        path.write_text(new_content)
-        logger.info(f"Wrote MEMORY.md: {count} entries ({len(new_content)} bytes)")
-
-        if old_content != new_content:
-            logger.info("MEMORY.md changed - core memory updated")
-
-    async def _regenerate_user_md(self):
-        rows = await get_user_profile_rows()
-        lines = ['# User Profile', "",
-                  "Auto-generated. Edit this file directly to override",
-                  f"Last updated: {__import__('datetime').datetime.now().isoformat()}", ""]
-        
-        if not rows:
-            lines.append("_No profile information yet. Omega will build this as conversations accumulate._")
+        was_written, reason = safe_auto_write("MEMORY", content)
+        if was_written:
+            logger.info(f"Wrote MEMORY.md: {count} entries ({len(content)} bytes)")
+            if old_content != content:
+                logger.info("MEMORY.md changed - core memory updated")
         else:
-            for row in rows:
-                confidence_pct = int((row.get("confidence", 0.5) or 0.5) * 100)
-                lines.append(f"- **{row['trait_key']}**: {row['trait_value']} _(confidence: {confidence_pct}%)_")
+            logger.warning(f"MEMORY.md write skipped: {reason}")
 
-        path = Path(omega_settings.memory_dir) / "USER.md"
-        old_content = ""
-        if path.exists():
-            old_content = path.read_text()
+    async def _reflect_profile(self):
+        try:
+            total_messages = await count_total_msgs()
+            min_messages = omega_settings.profile_inference_min_messages
+            if total_messages < min_messages:
+                logger.info(
+                    f"profile reflection skipped: warm-up - {total_messages} total messages"
+                    f"(need {min_messages})"
+                )
+                return
 
-        new_content = "\n".join(lines)
-        path.write_text(new_content)
-        logger.info(f"Wrote USER.md: {len(rows)} traits ({len(new_content)} bytes)")
+            recent_msgs = await self._fetch_msgs_for_reflection()
+            if not recent_msgs:
+                logger.info("profile reflection: no recent messages available")
+                return
 
-        if old_content != new_content:
-            logger.info("USER.md changed - profile updated")
+            current_user_md = read_user_md()
+            if not current_user_md:
+                current_user_md = "(USER.md is empty - no profile yet)"
+
+            messages_text = self._format_msgs_refl(recent_msgs)
+            prompt = PROFILE_PROMPT.format(
+                current_user_md=current_user_md,
+                messages_text=messages_text,
+            )
+
+            response = await self.llm_client.generate_json(prompt, "")
+            result = json.loads(response)
+            updates = result.get("updates", [])
+            observations = result.get("observations", "")
+
+            if observations:
+                logger.info(f"profile reflection observations: {observations}")
+
+            if not updates:
+                logger.info("profile reflection: no updates proposed")
+                return
+
+            await self._apply_profile_updates(updates)
+
+        except json.JSONDecodeError as e:
+            logger.error(f"profile reflecton: LLM returned invalid JSON: {e}")
+        except Exception as e:
+            logger.error(f"profile reflection failed (non_fatal): {e}")
+
+    async def _fetch_msgs_for_reflection(self) -> list[dict]:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT role, content, created_at, session_id
+                FROM messages
+                WHERE role IN ('user', 'assistant')
+                ORDER BY created_at DESC
+                LIMIT 20
+            """)
+        messages = [dict(r) for r in rows]
+        messages.reverse()
+        return messages
+
+    def _format_msgs_refl(self, messages: list[dict]) -> str:
+        MAX_MSG_LEN = 500
+        lines = []
+        current_session = None
+
+        for msg in messages:
+            sid = str(msg.get("session_id", ""))[:8]
+            role = msg["role"].upper()
+            content = msg.get("content", "")
+
+            if len(content) > MAX_MSG_LEN:
+                content = content[:MAX_MSG_LEN] + " ..."
+
+            if sid != current_session:
+                current_session = sid
+                lines.append(f"\n--- Session {sid} ---")
+
+            lines.append(f"[{role}] {content}")
+        return "\n".join(lines)
+
+    async def _apply_profile_updates(self, updates: list[dict]):
+        current = read_user_md()
+        if not current or "No profile information yet" in current:
+            from omega.memory.core import USER_SEED
+            current = USER_SEED
+        
+        new_sections = []
+        for update in updates:
+            title = update.get("section_title", "Update").strip()
+            content = update.get("content", "").strip()
+            if not content:
+                continue
+
+            if title not in current:
+                new_sections.append(f"## {title}\n{content}\n")
+                logger.info(f"profile reflection: adding section '{title}' to USER.md")
+            else:
+                logger.debug(f"profile reflection: section '{title}' already in USER.md, skipping")
+
+        if not new_sections:
+            logger.info("profile refleciton: all proposed sections already exist in USER.md")
+            return
+
+        new_content = current.rstrip() + "\n\n" + "\n\n".join(new_sections)
+        new_content += f"\n\n*Profile last updated by consolidation: {datetime.now().isoformat()}*"
+        was_written, reason = safe_auto_write("USER", new_content)
+        if was_written:
+            logger.info(
+                f"profile reflection: wrote {len(new_sections)} new sections to USER.md "
+                f"({len(new_content)} chars)"
+            )
+        else:
+            logger.warning(f"profile reflection: USER.md write skipped - {reason}")
+
+
 
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         dot = sum(x * y for x, y in zip(a, b))

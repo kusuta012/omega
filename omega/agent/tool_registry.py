@@ -1,5 +1,7 @@
 import logging
 import json
+from omega.memory.core import read_memory_md, read_user_md
+from omega.memory.profile_infer import append_to_profile_file, safe_auto_write
 from omega.rag.synthesis import Synthesis
 from omega.storage.management_queries import (
     list_items_paginated, get_item_detail
@@ -127,6 +129,32 @@ TOOLS_OPENAI_FORMAT = [
             },
             "required": ["fact"]
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_profile",
+            "description": "Update your understanding of the user by writing to USER.md or MEMORY.md, use this when you notice something worth remembering about the the user's communication style, preferences, work habits, or identity. You can also use this to add important facts to your core memory. This is for natural-language notes about the user - write conversationally, not as structured data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Which file to update: 'USER.md' for information about the user (communication style, preferences, identity, habits), or 'MEMORY.md' for important facts and things you should always know",
+                        "enum": ["USER.md", "MEMORY.md"]
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The content to add. Write in natural language as a note to yourself. Examples: 'The user prefers very concise answers 1-2 sentences max. They get annoyed by verbosity' or 'User is a software engineer who works primarily in Rust and C' or 'User mentioned they are moving to Africa next month'"
+                    },
+                    "section_title": {
+                        "type": "string",
+                        "description": "optional markdown heading for the new section (eq. 'Communication Style', 'Work context', 'Their Habits')"
+                    }
+                },
+                "required": ["file", "content"]
+            }
+        }
     }
 ]
 
@@ -160,6 +188,7 @@ class ToolExecutor:
             "list_recent_items": self._list_items,
             "get_item_status": self._get_status,
             "remember": self._remember,
+            "update_profile": self._update_profile,
         }
 
         executor = executors.get(tool_name)
@@ -484,3 +513,68 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
             logger.warning(f"contradiction check LLM call failed: {e}")
 
         return None
+
+    async def _update_profile(self, args: dict) -> dict:
+        file_name = args.get("file", "").strip()
+        content = args.get("content", "").strip()
+        section_title = args.get("section_title", "").strip()
+
+        if not file_name:
+            return {
+                "success": False,
+                "error": "No file specified",
+                "result_summary": "update_profile: missing file parameter",
+            }
+
+        if not content:
+            return {
+                "success": False,
+                "error": "No content provided",
+                "result_summary": "update_profile: missing content parameter",
+            }
+
+        file_stem = file_name.replace(".md", "").upper()
+        if file_stem not in ("USER", "MEMORY"):
+            return {
+                "success": True,
+                "answer": f"Updated {file_name} with new section '{section_title}'.",
+                "result_summary": f"update_profile: appended to {file_name}",
+            }
+
+        if not section_title:
+            from datetime import datetime
+            section_title = f"update {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+        try:
+            was_written, reason = append_to_profile_file(file_stem, new_content, force=True)
+            if was_written:
+                return {
+                    "success": True,
+                    "answer": f"Updated {file_name} with new section '{section_title}'.",
+                    "result_summary": f"update_profile: appended to {file_name}",
+                }
+            else:
+                if file_stem == "MEMORY":
+                    current = read_memory_md()
+                else:
+                    current = read_user_md()
+                new_content = current.rstrip() + f"\n\n## {section_title}\n{content}\n"
+                was_written, reason = safe_auto_write(file_stem, new_content, force=True)
+                if was_written:
+                    return {
+                    "success": True,
+                    "answer": f"Updated {file_name} (replaced after append was blocked)",
+                    "result_summary": f"update_profile: replaced {file_name}",
+                    }
+                return {
+                    "success": False,
+                    "error": f"could not write to {file_name}: {reason}",
+                    "result_summary": f"update_profile: write blocked - {reason}",
+                }
+        except Exception as e:
+            logger.error(f"update_profile failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "result_summary": f"update_profile: error - {e}",
+            }

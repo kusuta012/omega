@@ -14,7 +14,9 @@ class OmegaSettings(BaseSettings):
     memory_inject_recent_summaries: int = 2
     memory_dir: str = "./omega_memory"
     tail_preserve_tokens: int = 20000
-    
+    profile_inference_enabled: bool = True
+    profile_inference_min_messages: int = 20
+    profile_inference_session_window: int = 10
     class Config:
         env_file = ".env"
         extra = "ignore"

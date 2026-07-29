@@ -204,3 +204,8 @@ async def upsert_user_profile(trait_key: str, trait_value: str, confidence: floa
                 confidence = $3,
                 updated_at = now()
         """, trait_key, trait_value, confidence)
+
+async def count_total_msgs() -> int:
+    async with db_pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM messages")
+    return count or 0
