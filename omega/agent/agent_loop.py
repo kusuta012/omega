@@ -52,6 +52,7 @@ class AgentLoop:
         all_sources = []
         loop_detector = LoopDetector()
         tool_round = 0
+        tool_results_seen_this_turn = False
 
         while True:
             response = await self.llm_client.chat_with_tools(
@@ -99,6 +100,13 @@ class AgentLoop:
             await self.session_manager.add_message("assistant", tool_decision_text)
 
             for tc in response.tool_calls:
+                if tool_results_seen_this_turn and tc.name == "remember":
+                    err = "remember blocked: tool results exist since last user turn - safety rule prevents existing facts from search/KB output"
+                    logger.warning(err)
+                    await self.session_manager.add_message("tool", err, tool_name="remember")
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": err})
+                    continue
+
                 if loop_detector.record_call(tc.name, tc.arguments):
                     bail = "I noticed I was repeating the same operations. Let me answer with what I have so far"
                     await self.session_manager.add_message("assistant", bail)
@@ -116,6 +124,7 @@ class AgentLoop:
                     "tool": tc.name, "input": tc.arguments,
                     "result_summary": result.get("result_summary", "no summary")
                 })
+                tool_results_seen_this_turn = True
                 if result.get("sources"):
                     all_sources.extend(result["sources"])
 

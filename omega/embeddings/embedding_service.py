@@ -3,13 +3,22 @@ import logging
 from omega.environment.conf_loader import omega_settings
 
 logger = logging.getLogger("EmbeddingService")
+EMBEDDING_DIM = 384
 
 class EmbeddingService:
     def __init__(self, model_name: str | None = None):
         model_name = model_name or omega_settings.embedding_model
         logger.info(f"Loading local embedding model {model_name}")
         self.model = SentenceTransformer(model_name)
-        logger.info("local embedding model loaded successfully")
+        get_dim = getattr(self.model, "get_embedding_dim", None) or getattr(self.model, "get_sentence_embedding_dim")
+        self.dim = get_dim()
+        if self.dim != EMBEDDING_DIM:
+            raise RuntimeError(
+                f"Embedding model '{model_name}' produces {self.dim}-dim vectors, "
+                f"but schema expects {EMBEDDING_DIM}-dim VECTOR({EMBEDDING_DIM})."
+                f"Update EMBEDDING_DIM in embedding_service.py and VECTOR(N) in schema.sql to match"
+            )
+        logger.info(f"local embedding model loaded successfully ({self.dim}-dim)")
     
     def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
         if not texts:

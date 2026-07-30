@@ -77,11 +77,3 @@ CREATE TABLE memory_entries (
 CREATE INDEX idx_messages_session ON messages(session_id, created_at);
 CREATE INDEX idx_memory_type_date ON memory_entries(memory_type, occurred_at);
 CREATE INDEX idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);
-
-CREATE TABLE user_profile (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    trait_key TEXT NOT NULL UNIQUE,
-    trait_value TEXT NOT NULL,
-    confidence FLOAT DEFAULT 0.5,
-    updated_at TIMESTAMP DEFAULT now()
-);

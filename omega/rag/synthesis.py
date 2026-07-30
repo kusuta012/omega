@@ -1,5 +1,5 @@
 import logging
-from omega.embeddings.embedding_service import EmbeddingService
+from omega.embeddings.embedding_service import get_embedding_service
 from omega.storage.retrieval_queries import search_hybrid_chunks, search_memory_entries
 from omega.storage.memory_queries import record_memory_access
 from omega.llm.client import get_llm_provider
@@ -30,7 +30,7 @@ Do NOT explain. Do not add any other text. Just the JSON array"""
 
 class Synthesis:
     def __init__(self):
-        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
+        self.embedding_service = get_embedding_service()
         self.llm_client = get_llm_provider()
 
     async def rewrite_query(self, query: str) -> list[str]:
