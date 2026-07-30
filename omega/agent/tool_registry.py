@@ -188,6 +188,27 @@ TOOLS_OPENAI_FORMAT = [
                 "required": ["item_id"],
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_overflow",
+            "description": "Read the next chunk of a tool result that was truncated due to length. Use this when a tool returns a result with a result_id and tells you there is more data to read",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "result_id": {
+                        "type": "string",
+                        "description": "The result_id provided in the truncated output",
+                    },
+                    "chunk_index": {
+                        "type": "integer",
+                        "description": "The index of the chunk to read (starts a 1).",
+                    }
+                },
+                "required": ["result_id", "chunk_index"],
+            },
+        },
     }
 ]
 
@@ -213,7 +234,7 @@ class ToolExecutor:
         self.llm_client = get_llm_provider()
         self.embedding_service = get_embedding_service()
 
-    async def execute(self, tool_name: str, arguments: dict) -> dict:
+    async def execute(self, tool_name: str, arguments: dict, turn_context=None) -> dict:
         executors = {
             "search_knowledge_base": self._search,
             "search_memory": self._search_memory,
@@ -224,6 +245,7 @@ class ToolExecutor:
             "update_profile": self._update_profile,
             "write_scratchpad": self._write_scratchpad,
             "read_full_document": self._read_full_document,
+            "read_overflow": lambda args: self._read_overflow(args, turn_context)
         }
 
         executor = executors.get(tool_name)
@@ -668,3 +690,25 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
                 "error": str(e),
                 "result_summary": f"read_full_document: error - {e}",
             }
+
+    async def _read_overflow(self, args: dict, turn_context) -> dict:
+        if not turn_context:
+            return {
+                "success": False,
+                "error": "No turn_context available",
+                "result_summary": "read_overflow: no turn_context"
+            }
+
+        result_id = args.get("result_id", "")
+        chunk_index = args.get("chunk_index", 0)
+
+        if not result_id:
+            return {"success": False, "error": "missing result_id", "result_summary": "read_overflow: missing result_id"}
+
+        result = turn_context.read_chunk(result_id, chunk_index)
+        if result["success"]:
+            result["result_summary"] = f"read_overflow: loaded chunk {chunk_index} of {result_id}"
+        else:
+            result["result_summary"] = f"read_overflow: failed - {result.get('error')}"
+
+        return result

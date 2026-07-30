@@ -7,6 +7,8 @@ from omega.memory.loop_detector import LoopDetector
 from omega.memory.context_build import EXEC_HARNESS
 from omega.memory.consolidation import get_consolidation_job
 from omega.environment.conf_loader import omega_settings
+from omega.memory.turn_context import TurnContextManager
+import asyncio
 
 logger = logging.getLogger("AgentLoop")
 
@@ -31,12 +33,13 @@ class AgentLoop:
         tool_round = 0
         tool_results_seen_this_turn = False
         turn_scratchpad = []
+        turn_context = TurnContextManager()
 
         while True:
             current_system_content = system_context + "\n\n" + EXEC_HARNESS
             if turn_scratchpad:
-                scratchpad_text = "\n\n[CURRENT SCRATCHPAD NOTES\n" + "\n".join(f"- {note}" for note in turn_scratchpad)
-                current_system_context += scratchpad_text
+                scratchpad_text = "\n\n[CURRENT SCRATCHPAD NOTES]\n" + "\n".join(f"- {note}" for note in turn_scratchpad)
+                current_system_content += scratchpad_text
 
             messages[0]["content"] = current_system_content
 
@@ -79,11 +82,23 @@ class AgentLoop:
             messages.append(assistant_msg)
 
             tool_decision_text = response.content or ""
-            tool_names = [tc.name for tc in response.tool_calls]
-            if not tool_decision_text:
-                tool_decision_text = f"[Calling tools: {', '.join(tool_names)}]"
+
+
+            if response.tool_calls and not tool_decision_text.strip():
+                logger.warning("Structured Reasoning Enforcer: LLM emitted tool call without CoT monologue. Intercepting.")
+                err_msg = "[SYSTEM REJECTION: You attempted to call a tool without explaining your reasoning first. State your thought process and plan before calling any tools.]"
+                for tc in response.tool_calls:
+                    await self.session_manager.add_message("tool", err_msg, tool_name=tc.name)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": err_msg
+                    })
+                continue
+
             await self.session_manager.add_message("assistant", tool_decision_text)
 
+            safe_tool_calls = []
             for tc in response.tool_calls:
                 if tool_results_seen_this_turn and tc.name == "remember":
                     err = "remember blocked: tool results exist since last user turn - safety rule prevents existing facts from search/KB output"
@@ -103,23 +118,39 @@ class AgentLoop:
                         "sources": all_sources, "tool_calls": tool_calls_log
                     }
 
+                safe_tool_calls.append(tc)
+
+            async def run_tool(tc):
                 logger.info(f"Executing tool: {tc.name}({tc.arguments})")
-                result = await self.tool_executor.execute(tc.name, tc.arguments)
+                try:
+                    result = await self.tool_executor.execute(tc.name, tc.arguments, turn_context=turn_context)
+                    return tc, result
+                except Exception as e:
+                    logger.error(f"Tool {tc.name} failed with unhandled exception: {e}")
+                    return tc, {"success": False, "error": str(e), "result_summary": f"Unhandled error: {e}"}
+                
+            execution_tasks = [run_tool(tc) for tc in safe_tool_calls]
+            executed_results = await asyncio.gather(*execution_tasks)
+            
+            for i, (tc, result) in enumerate(executed_results):
                 tool_calls_log.append({
                     "tool": tc.name, "input": tc.arguments,
                     "result_summary": result.get("result_summary", "no summary")
                 })
                 tool_results_seen_this_turn = True
+
                 if result.get("sources"):
                     all_sources.extend(result["sources"])
                 if result.get("scratchpad_note"):
                     turn_scratchpad.append(result["scratchpad_note"])
                 
-                tool_content = result.get("answer", result.get("error", "No result"))
+                raw_tool_content = result.get("answer", result.get("error", "No result"))
+                tool_content = turn_context.truncate_and_cache(tc.name, raw_tool_content)
+
                 await self.session_manager.add_message("tool", tool_content, tool_name=tc.name)
 
                 ephemeral_content = tool_content
-                if tc == response.tool_calls[-1]:
+                if i == len(executed_results) - 1:
                     reflection = f"\n\n[SYSTEM INSTRUCTION: You have completed {tool_round} of {omega_settings.max_tool_rounds_per_turn} tool rounds. Evaluate the results above. If you have enough information to fully answer the user, do so. If not, state what is missing and use another tool.]"
                     ephemeral_content += reflection
 
