@@ -7,16 +7,15 @@ from omega.storage.memory_queries import (
     get_unconsolidated_count,
     mark_entries_consolidated,
     apply_importance_decay,
-    get_user_profile_rows,
     count_total_msgs
 )
 from omega.storage.retrieval_queries import search_memory_entries
 from omega.storage.postgres_session import db_pool
-from omega.embeddings.embedding_service import EmbeddingService
+from omega.embeddings.embedding_service import get_embedding_service
 from omega.llm.client import get_llm_provider
 from omega.memory.core import read_memory_md, read_user_md
 from omega.environment.conf_loader import omega_settings
-from omega.memory.profile_infer import (safe_auto_write, append_to_profile_file)
+from omega.memory.profile_infer import (append_section_to_profile, safe_auto_write, append_tsection_to_profile)
 
 logger = logging.getLogger("Consolidation")
 
@@ -25,7 +24,7 @@ MERGE_SIMILARITY_THRESHOLD = 0.15
 DECAY_DAYS_THRESHOLD = 7
 DECAY_FACTOR = 0.95
 DECAY_FLOOR = 0.05
-CORE_MEMORY_MAX_ENTRIES = 15
+CORE_MEMORY_MAX_ENTRIES = 10
 
 PATTERN_PROMPT = """You are Omega's memory curator. Review these recent memory entries
 (session summaries and extracted facts) and identify TWO things:
@@ -89,7 +88,7 @@ Rules:
 class ConsolidationJob:
     def __init__(self):
         self.llm_client = get_llm_provider()
-        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
+        self.embedding_service = get_embedding_service()
 
     async def trigger_if_needed(self) -> bool:
         count = await get_unconsolidated_count()
@@ -406,40 +405,23 @@ class ConsolidationJob:
         return "\n".join(lines)
 
     async def _apply_profile_updates(self, updates: list[dict]):
-        current = read_user_md()
-        if not current or "No profile information yet" in current:
-            from omega.memory.core import USER_SEED
-            current = USER_SEED
-        
-        new_sections = []
+
         for update in updates:
             title = update.get("section_title", "Update").strip()
             content = update.get("content", "").strip()
             if not content:
                 continue
 
-            if title not in current:
-                new_sections.append(f"## {title}\n{content}\n")
-                logger.info(f"profile reflection: adding section '{title}' to USER.md")
-            else:
+            current = read_user_md()
+            if title in current:
                 logger.debug(f"profile reflection: section '{title}' already in USER.md, skipping")
+                continue
 
-        if not new_sections:
-            logger.info("profile refleciton: all proposed sections already exist in USER.md")
-            return
-
-        new_content = current.rstrip() + "\n\n" + "\n\n".join(new_sections)
-        new_content += f"\n\n*Profile last updated by consolidation: {datetime.now().isoformat()}*"
-        was_written, reason = safe_auto_write("USER", new_content)
-        if was_written:
-            logger.info(
-                f"profile reflection: wrote {len(new_sections)} new sections to USER.md "
-                f"({len(new_content)} chars)"
-            )
-        else:
-            logger.warning(f"profile reflection: USER.md write skipped - {reason}")
-
-
+            was_written, reason = append_section_to_profile("USER", content, title)
+            if was_written:
+                logger.info(f"profile reflection: added section '{title}' to USER.md")
+            else:
+                logger.debug(f"profile reflection: failed to add '{title}' - {reason}")
 
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         dot = sum(x * y for x, y in zip(a, b))

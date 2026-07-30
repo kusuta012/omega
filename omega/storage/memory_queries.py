@@ -187,24 +187,6 @@ async def apply_importance_decay(entry_ids: list[str], decay_factor: float = 0.9
             WHERE id = ANY($1::uuid[])
         """, entry_ids, decay_factor)
 
-async def get_user_profile_rows() -> list[dict]:
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, trait_key, trait_value, confidence, updated_at FROM user_profile ORDER BY trait_key"
-        )
-    return [dict(r) for r in rows]
-
-async def upsert_user_profile(trait_key: str, trait_value: str, confidence: float = 0.5):
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO user_profile (trait_key, trait_value, confidence, updated_at)
-            VALUES ($1, $2, $3, now())
-            ON CONFLICT (trait_key) DO UPDATE SET
-                trait_value = $2,
-                confidence = $3,
-                updated_at = now()
-        """, trait_key, trait_value, confidence)
-
 async def count_total_msgs() -> int:
     async with db_pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM messages")

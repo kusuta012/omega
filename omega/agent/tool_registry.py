@@ -1,7 +1,6 @@
 import logging
 import json
-from omega.memory.core import read_memory_md, read_user_md
-from omega.memory.profile_infer import append_to_profile_file, safe_auto_write
+from omega.memory.profile_infer import append_section_to_profile, safe_auto_write
 from omega.rag.synthesis import Synthesis
 from omega.storage.management_queries import (
     list_items_paginated, get_item_detail
@@ -10,7 +9,7 @@ from omega.storage.item_queries import fetch_item_by_id
 from omega.storage.memory_queries import store_extracted_fact, find_similar_facts
 from omega.storage.postgres_session import db_pool
 from omega.llm.client import get_llm_provider
-from omega.embeddings.embedding_service import EmbeddingService
+from omega.embeddings.embedding_service import get_embedding_service
 
 logger = logging.getLogger("ToolRegistry")
 
@@ -178,7 +177,7 @@ class ToolExecutor:
     def __init__(self):
         self.synthesis = Synthesis()
         self.llm_client = get_llm_provider()
-        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
+        self.embedding_service = get_embedding_service()
 
     async def execute(self, tool_name: str, arguments: dict) -> dict:
         executors = {
@@ -467,15 +466,15 @@ class ToolExecutor:
                 "result_summary": f"remember tool failed: {e}"
             }
         
-        superseded_note = ""
+        supersedes_note = ""
         if supersedes_id:
             supersedes_note = " (updated a previous memory)"
 
         return {
             "success": True,
-            "answer": f"I'll remember that{superseded_note}.",
+            "answer": f"I'll remember that{supersedes_note}.",
             "sources": [],
-            "result_summary": f"stored fact (importance={importance:.1f}){superseded_note}",
+            "result_summary": f"stored fact (importance={importance:.1f}){supersedes_note}",
             "memory_entry_id": str(entry_id),
         }
 
@@ -536,8 +535,8 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
         file_stem = file_name.replace(".md", "").upper()
         if file_stem not in ("USER", "MEMORY"):
             return {
-                "success": True,
-                "answer": f"Updated {file_name} with new section '{section_title}'.",
+                "success": False,
+                "answer": f"Unknown file: {file_name}. Use 'USER.md' or 'MEMORY.md'",
                 "result_summary": f"update_profile: appended to {file_name}",
             }
 
@@ -546,31 +545,18 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
             section_title = f"update {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
         try:
-            was_written, reason = append_to_profile_file(file_stem, new_content, force=True)
+            was_written, reason = append_section_to_profile(file_stem, content, section_title)
             if was_written:
                 return {
                     "success": True,
                     "answer": f"Updated {file_name} with new section '{section_title}'.",
                     "result_summary": f"update_profile: appended to {file_name}",
                 }
-            else:
-                if file_stem == "MEMORY":
-                    current = read_memory_md()
-                else:
-                    current = read_user_md()
-                new_content = current.rstrip() + f"\n\n## {section_title}\n{content}\n"
-                was_written, reason = safe_auto_write(file_stem, new_content, force=True)
-                if was_written:
-                    return {
-                    "success": True,
-                    "answer": f"Updated {file_name} (replaced after append was blocked)",
-                    "result_summary": f"update_profile: replaced {file_name}",
-                    }
-                return {
-                    "success": False,
-                    "error": f"could not write to {file_name}: {reason}",
-                    "result_summary": f"update_profile: write blocked - {reason}",
-                }
+            return {
+                "success": False,
+                "error": f"could not write to {file_name}: {reason}",
+                "result_summary": f"update_profile: write blocked - {reason}",
+            }
         except Exception as e:
             logger.error(f"update_profile failed: {e}")
             return {

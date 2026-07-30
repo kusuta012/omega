@@ -11,27 +11,27 @@ def _hash_path(file_stem: str) -> Path:
     memory_dir = Path(omega_settings.memory_dir)
     return memory_dir / f".{file_stem}.last_auto_hash"
 
-def file_path(file_stem: str) -> Path:
+def _file_path(file_stem: str) -> Path:
     memory_dir = Path(omega_settings.memory_dir)
     return memory_dir / f"{file_stem}.md"
 
-def compute_hash(content: str) -> str:
+def _compute_hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 def was_man_edited(file_stem: str) -> tuple[bool, str]:
-    path = file_path(file_stem)
+    path = _file_path(file_stem)
     hash_path = _hash_path(file_stem)
 
     if not path.exists():
         return False, f"{file_stem}.md does not exist yet"
 
-    current_hash = compute_hash(path.read_text)
+    current_hash = _compute_hash(path.read_text)
 
     if not hash_path.exists():
-        _hash_path.write_text(current_hash)
+        hash_path.write_text(current_hash)
         return False, f"first run, stored baseline hash for {file_stem}.md"
 
-    stored_hash = _hash_path.read_text().strip()
+    stored_hash = hash_path.read_text().strip()
 
     if current_hash != stored_hash:
         return True, (
@@ -41,9 +41,9 @@ def was_man_edited(file_stem: str) -> tuple[bool, str]:
 
     return False, f"{file_stem}.md unchanged since last auto-write"
 
-def record_auto_write(file_stem: str, content: str):
+def _record_auto_write(file_stem: str, content: str):
     hash_path = _hash_path(file_stem)
-    hash_path.write_text(compute_hash(content))
+    hash_path.write_text(_compute_hash(content))
 
 def safe_auto_write(file_stem: str, content: str, force: bool = False) -> tuple[bool, str]:
     if not force:
@@ -52,7 +52,6 @@ def safe_auto_write(file_stem: str, content: str, force: bool = False) -> tuple[
             logger.warning(
                 f"skipping auto-write to {file_stem}.md: {reason}"
                 "preserving manual user edits, remove the last auto hash file"
-                f"or edit {file_stem}.md to match auto generated content to resume auto-writes"
             )
             return False, reason
 
@@ -66,22 +65,23 @@ def safe_auto_write(file_stem: str, content: str, force: bool = False) -> tuple[
     finally:
         os.close(fd)
 
-    os.rename(tmp_path, str(file_path(file_stem)))
-    record_auto_write(file_stem, content)
+    os.rename(tmp_path, str(_file_path(file_stem)))
+    _record_auto_write(file_stem, content)
 
     logger.info(f"wrote {file_stem}.md ({len(content)} chars)")
     return True, f"wrote {file_stem}.md ({len(content)} chars)"
 
-def append_to_profile_file(file_stem: str, text: str, section_title: str = "") -> tuple[bool, str]:
+def append_section_to_profile(file_stem: str, text: str, section_title: str = "", force:bool = False) -> tuple[bool, str]:
     from omega.memory.core import read_memory_md, read_user_md
 
-    edited, reason = was_man_edited(file_stem)
-    if edited:
-        logger.warning(
-            f"skipping append to {file_stem}.md: user manually edited"
-            "Append would risk clobbering manual changes"
-        )
-        return False, f"skipped: {file_stem}.md was manually edited"
+    if not force:
+        edited, reason = was_man_edited(file_stem)
+        if edited:
+            logger.warning(
+                f"skipping append to {file_stem}.md: user manually edited"
+                "Append would risk clobbering manual changes"
+            )
+            return False, f"skipped: {file_stem}.md was manually edited"
 
     if file_stem == "MEMORY":
         current = read_memory_md()
@@ -93,4 +93,4 @@ def append_to_profile_file(file_stem: str, text: str, section_title: str = "") -
         new_section += f"\n\n## {section_title}\n"
     new_section += f"{text}\n"
     new_content = current.rstrip() + "\n" + new_section
-    return safe_auto_write(file_stem, new_content, force=False)
+    return safe_auto_write(file_stem, new_content, force=force)

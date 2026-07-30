@@ -13,7 +13,7 @@ from omega.storage.memory_queries import (
 from omega.memory.context_build import estimate_tokens, build_system_context
 from omega.memory.core import ensure_memory_dir
 from omega.llm.client import get_llm_provider
-from omega.embeddings.embedding_service import EmbeddingService
+from omega.embeddings.embedding_service import get_embedding_service
 from omega.environment.conf_loader import omega_settings
 
 logger = logging.getLogger("SessionManager")
@@ -42,7 +42,7 @@ class SessionManager:
         self.active_session_id = None
         self.system_context = None
         self.llm_client = get_llm_provider()
-        self.embedding_service = EmbeddingService(model_name="all-MiniLM-L6-v2")
+        self.embedding_service = get_embedding_service()
         ensure_memory_dir()
 
     async def ensure_session(self) -> str:
