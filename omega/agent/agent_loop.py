@@ -4,34 +4,11 @@ from omega.llm.client import get_llm_provider
 from omega.agent.tool_registry import ToolExecutor, TOOLS_OPENAI_FORMAT
 from omega.memory.session_manager import SessionManager
 from omega.memory.loop_detector import LoopDetector
-from omega.memory.context_build import estimate_tokens
+from omega.memory.context_build import EXEC_HARNESS
 from omega.memory.consolidation import get_consolidation_job
+from omega.environment.conf_loader import omega_settings
 
 logger = logging.getLogger("AgentLoop")
-
-MAX_TOOL_ROUNDS_PER_TURN = 5
-# CLASSIFIER_SYS_PROMPT = """You are Omega's intent classifier. Given a user's request, determine which tool to call
-
-# Availabile tools:
-
-# 1. search_knowledge_base(query)
-#     search saved content to answer a factual question.
-#     This is the DEFAULT - use it for any request seeking an answer, and for ANY ambigious request.
-
-# 2. summarize_item(title_query)
-#     Summarize a specific saved item. ONLY use when user explicitly names an item AND asks for a summary.
-
-# 3. list_recent_items(count, source_type)
-#     List saved items. Use when the user wants to see what they have, not get an answer.
-#     count: number of items (default 10). source_type: optional filter (url/pdf/text/code)
-
-# 4. get_item_status(title_query)
-#     Check processing status of a named item. Use when the user asks about an item's state.
-
-# CRITICAL RULE: If a request could plausibly map to more than one tool, you MUST choose search_knowledge_base. Never guess an item identity for summarize_item - only use it when the user clearly names something specific.
-
-# Respond with ONLY a JSON object:
-# {"tool": "tool_name", "arguments": {"key": "value"}}"""
 
 class AgentLoop:
     def __init__(self):
@@ -53,8 +30,16 @@ class AgentLoop:
         loop_detector = LoopDetector()
         tool_round = 0
         tool_results_seen_this_turn = False
+        turn_scratchpad = []
 
         while True:
+            current_system_content = system_context + "\n\n" + EXEC_HARNESS
+            if turn_scratchpad:
+                scratchpad_text = "\n\n[CURRENT SCRATCHPAD NOTES\n" + "\n".join(f"- {note}" for note in turn_scratchpad)
+                current_system_context += scratchpad_text
+
+            messages[0]["content"] = current_system_content
+
             response = await self.llm_client.chat_with_tools(
                 messages=messages, tools=TOOLS_OPENAI_FORMAT
             )
@@ -73,9 +58,9 @@ class AgentLoop:
                 }
 
             tool_round += 1
-            if tool_round > MAX_TOOL_ROUNDS_PER_TURN:
-                bail = f"I've reached my limit of {MAX_TOOL_ROUNDS_PER_TURN} tool-calling rounds. Let me answer with what I have"
-                logger.warning(f"Hard tool-round cap hit {MAX_TOOL_ROUNDS_PER_TURN} for message: {user_message[:80]}")
+            if tool_round > omega_settings.max_tool_rounds_per_turn:
+                bail = f"I've reached my limit of {omega_settings.max_tool_rounds_per_turn} tool-calling rounds. Let me answer with what I have"
+                logger.warning(f"Hard tool-round cap hit {omega_settings.max_tool_rounds_per_turn} for message: {user_message[:80]}")
                 await self.session_manager.add_message("assistant", bail)
                 await self.session_manager.check_and_compress(self.tools_schema_text)
                 await self._maybe_consolidate()
@@ -127,11 +112,19 @@ class AgentLoop:
                 tool_results_seen_this_turn = True
                 if result.get("sources"):
                     all_sources.extend(result["sources"])
-
+                if result.get("scratchpad_note"):
+                    turn_scratchpad.append(result["scratchpad_note"])
+                
                 tool_content = result.get("answer", result.get("error", "No result"))
                 await self.session_manager.add_message("tool", tool_content, tool_name=tc.name)
+
+                ephemeral_content = tool_content
+                if tc == response.tool_calls[-1]:
+                    reflection = f"\n\n[SYSTEM INSTRUCTION: You have completed {tool_round} of {omega_settings.max_tool_rounds_per_turn} tool rounds. Evaluate the results above. If you have enough information to fully answer the user, do so. If not, state what is missing and use another tool.]"
+                    ephemeral_content += reflection
+
                 messages.append({
-                    "role": "tool", "tool_call_id": tc.id, "content": tool_content 
+                    "role": "tool", "tool_call_id": tc.id, "content": ephemeral_content 
                 })
 
     async def new_session(self) -> str:

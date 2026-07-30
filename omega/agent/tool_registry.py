@@ -154,6 +154,40 @@ TOOLS_OPENAI_FORMAT = [
                 "required": ["file", "content"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_scratchpad",
+            "description": "Write a note to your temporary scratchpad. Use this to aggregate intermediate findings across multiple tool calls during a complex task (e.g 'Found Solmon in doc A, now searching for his email in doc B'). The scratchpad is cleared at the end of the current turn.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "The note or finding to save to the scratchpad",
+                    }
+                },
+                "required": ["note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_full_document",
+            "description": "Read the full contents of a specific saved document. Use this when a standard search returns a chunk of a document, but you need to read the entire file (or a much larger section of it) to fully answer the user's question. Requires the exact item_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": "string",
+                        "description": "The exact UUID of the item to read (obtained from the sources of a previous search_knowledge_base call)",
+                    }
+                },
+                "required": ["item_id"],
+            }
+        }
     }
 ]
 
@@ -188,6 +222,8 @@ class ToolExecutor:
             "get_item_status": self._get_status,
             "remember": self._remember,
             "update_profile": self._update_profile,
+            "write_scratchpad": self._write_scratchpad,
+            "read_full_document": self._read_full_document,
         }
 
         executor = executors.get(tool_name)
@@ -563,4 +599,72 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
                 "success": False,
                 "error": str(e),
                 "result_summary": f"update_profile: error - {e}",
+            }
+
+    async def _write_scratchpad(self, args: dict) -> dict:
+        note = args.get("note", "").strip()
+        if not note:
+            return {
+                "success": False,
+                "error": "No note provided",
+                "result_summary": "write_scratchpad: missing note parameter",
+            }
+
+        return {
+            "success": True,
+            "answer": "Note saved to your scratchpad",
+            "scratchpad_note": note,
+            "result_summary": f"write_scratchpad: saved note ({len(note)} chars)",
+        }
+
+    async def _read_full_document(self, args: dict) -> dict:
+        item_id = args.get("item_id", "").strip()
+        if not item_id:
+            return {
+                "success": False,
+                "error": f"No item_id provided",
+                "result_summary": "read_full_document: missing item_id",
+            }
+
+        try:
+            item = await fetch_item_by_id(item_id)
+            if not item:
+                return {
+                    "success": False,
+                    "error": f"Item with ID {item_id} not found",
+                    "result_summary": "read_full_document: item not found",
+                }
+            
+            content = item.get("raw_content") or ""
+            if not content:
+                return {
+                    "success": False,
+                    "error": f"Item '{item.get('title', item_id)}' has no text content",
+                    "result_summary": "read_full_document: no content",
+                }
+
+            max_chars = 15000
+            truncated = False
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n\n[...Content truncated due to length...]"
+                truncated = True
+
+            title = item.get("title") or "Untitled"
+            answer = f"DOCUMENT TITLE: {title}\n\nCONTENT:\n{content}"
+            summary = f"read_full_document: {title} ({len(content)} chars)"
+            if truncated:
+                summary += " (truncated)"
+
+            return {
+                "success": True,
+                "answer": answer,
+                "sources": [{"title": title, "item_id": item_id, "match_type": "deep_read"}],
+                "result_summary": summary,
+            }
+        except Exception as e:
+            logger.error(f"read_full_document failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "result_summary": f"read_full_document: error - {e}",
             }
