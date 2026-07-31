@@ -16,17 +16,53 @@ async def create_session() -> str:
     logger.info(f"Created new session {session_id}")
     return session_id
 
-async def get_active_session():
+async def get_active_session() -> dict | None:
     async with db_pool.acquire() as conn:
-        return await conn.fetchrow(
+        row = await conn.fetchrow(
             "SELECT id, started_at FROM sessions WHERE status = 'active' ORDER BY started_at DESC LIMIT 1"
         )
+    return dict(row) if row else None
 
-async def find_orphaned_sessions() -> list[dict]:
+async def find_resumable_session() -> dict | None:
+    active_session = await get_active_session()
+    if active_session:
+        return active_session
+
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, started_at FROM sessions WHERE status = 'active' ORDER BY started_at ASC"
-        )
+        row = await conn.fetchrow("""
+            SELECT id, started_at, ended_at
+            FROM sessions
+            WHERE status = 'closed'
+            ORDER BY ended_at DESC NULLS LAST, started_at DESC
+            LIMIT 1
+        """)
+    return dict(row) if row else None
+
+async def reopen_session(session_id: str) -> bool:
+    async with db_pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE sessions
+            SET status = 'active', ended_at = NULL
+            WHERE id = $1 AND status = 'closed'
+        """, session_id)
+    reopened = result == "UPDATE 1"
+    if reopened:
+        logger.info(f"Reopened session {session_id}")
+    return reopened
+
+async def find_orphaned_sessions(exclude_session_id: str | None = None) -> list[dict]:
+    async with db_pool.acquire() as conn:
+        if exclude_session_id is None:
+            rows = await conn.fetch(
+                "SELECT id, started_at FROM sessions WHERE status = 'active' ORDER BY started_at ASC"
+            )
+        else:
+            rows = await conn.fetch("""
+                SELECT id, started_at
+                FROM sessions
+                WHERE status = 'active' AND id != $1
+                ORDER BY started_at ASC
+            """, exclude_session_id)
     return [dict(r) for r in rows]
 
 async def close_session(session_id: str):

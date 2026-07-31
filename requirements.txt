@@ -7,3 +7,4 @@ pdfplumber
 httpx
 sentence-transformers
 tenacity
+prompt-toolkit

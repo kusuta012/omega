@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omega-agent"
+version = "0.1.0"
+description = "A local personal memory agent ig"
+readme = "README.md"
+requires-python ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "asyncpg",
+    "pydantic-settings",
+    "trafilatura",
+    "pdfplumber",
+    "httpx",
+    "sentence-transformers",
+    "tenacity",
+    "prompt-toolkit"
+]
+
+[project.scripts]
+omega = "omega.cli.main:main"
+
+[tool.setuptools.package.find]
+include = ["omega*"]

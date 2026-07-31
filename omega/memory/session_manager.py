@@ -1,7 +1,10 @@
 import logging
+
+from sympy.interactive import session
 from omega.storage.memory_queries import (
     create_session,
-    get_active_session,
+    find_resumable_session,
+    reopen_session,
     close_session,
     get_session_messages,
     append_message,
@@ -39,19 +42,50 @@ Be thorough but concise. This summary will be used to provide continuity in futu
 
 class SessionManager:
     def __init__(self):
-        self.active_session_id = None
-        self.system_context = None
+        self.active_session_id: str | None = None
+        self.system_context: str | None = None
         self.llm_client = get_llm_provider()
         self.embedding_service = get_embedding_service()
         ensure_memory_dir()
 
-    async def ensure_session(self) -> str:
+    def _require_active_session_id(self) -> str:
+        if self.active_session_id is None:
+            raise RuntimeError("No active session is available")
+        return self.active_session_id
+
+    async def ensure_session(self, resume: bool = False) -> str:
         if self.active_session_id:
             return self.active_session_id
+        if resume:
+            resume_session_id = await self.resume_latest_session()
+            if resume_session_id:
+                return resume_session_id
+
         await self._recover_orphaned_sessions()
         self.active_session_id = await create_session()
         self.system_context = await build_system_context()
         logger.info(f"Session started: {self.active_session_id}")
+        return self.active_session_id
+
+    async def resume_latest_session(self) -> str | None:
+        if self.active_session_id:
+            return self.active_session_id
+
+        candidate = await find_resumable_session()
+        if not candidate:
+            logger.info("No prior session is available to resume")
+            return None
+
+        session_id = str(candidate["id"])
+        await self._recover_orphaned_sessions(exclude_session_id=session_id)
+
+        reopened = await reopen_session(session_id)
+        if not reopened:
+            logger.info("Resuming already-active session %s", session_id)
+
+        self.active_session_id = session_id
+        self.system_context = await build_system_context()
+        logger.info("Resumed session %s", session_id)
         return self.active_session_id
 
     async def start_new_session(self) -> str:
@@ -98,17 +132,17 @@ class SessionManager:
         )
 
     async def _create_session_summary(self, messages: list[dict]):
-        await self._create_session_summary_for(self.active_session_id, messages, trigger="session_close")
+        await self._create_session_summary_for(self._require_active_session_id(), messages, trigger="session_close")
 
     async def add_message(self, role: str, content: str, tool_name: str = None):
-        await append_message(self.active_session_id, role, content, tool_name)
+        await append_message(self._require_active_session_id(), role, content, tool_name)
 
     async def get_context_messages(self) -> list[dict]:
-        messages = await get_session_messages(self.active_session_id)
+        messages = await get_session_messages(self._require_active_session_id())
         return [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")]
 
     async def check_and_compress(self, tool_schemas_text: str = ""):
-        messages = await get_session_messages(self.active_session_id)
+        messages = await get_session_messages(self._require_active_session_id)
         if len(messages) < 4:
             return
 
@@ -166,7 +200,7 @@ class SessionManager:
             memory_type="session_summary",
             content=summary,
             embedding=embedding,
-            source_session_id=self.active_session_id,
+            source_session_id=self._require_active_session_id(),
             metadata={
                 "message_count": len(compress_span),
                 "trigger": "emergency_compression"
@@ -195,8 +229,8 @@ class SessionManager:
             lines.append(f"[{role}]: {content}")
         return "\n".join(lines)
 
-    async def _recover_orphaned_sessions(self):
-        orphans = await find_orphaned_sessions()
+    async def _recover_orphaned_sessions(self, exclude_session_id: str | None = None):
+        orphans = await find_orphaned_sessions(exclude_session_id=exclude_session_id)
         if not orphans:
             return
 
