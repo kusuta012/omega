@@ -1,11 +1,11 @@
 from __future__ import annotations
-from multiprocessing import Value
 import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from omega.environment.conf_loader import omega_settings
 from omega.memory.consolidation import get_consolidation_job
 from omega.memory.core import read_memory_md, read_user_md
+from omega.storage.memory_queries import get_session_messages
 
 if TYPE_CHECKING:
     from omega.agent.agent_loop import AgentLoop
@@ -47,9 +47,17 @@ async def handle_command(text: str, agent: "AgentLoop") -> CommandResult:
         return CommandResult(f"Started a new session: {session_id}")
     if command == "/status":
         session_id = agent.session_manager.active_session_id or "not started"
+        if session_id is None:
+            session_label = "not started"
+            messages_count = 0
+        else:
+            session_label = str(session_id)
+            message_count = len(await get_session_messages(session_id))
         return CommandResult(
             "\n".join([
-                f"Session: {session_id}",
+                f"Session: {session_label}",
+
+                f"Messages: {message_count}",
                 f"Provider: {omega_settings.llm_provider}",
                 f"Model: {omega_settings.llm_model}",
                 f"Tool-round limit: {omega_settings.max_tool_rounds_per_turn}",
@@ -61,9 +69,11 @@ async def handle_command(text: str, agent: "AgentLoop") -> CommandResult:
         profile = read_user_md().strip() or "(USER.md is empty)"
         return CommandResult(f"# MEMORY.md\n{memory}\n\n# USER.md\n{profile}")
     if command == "/compress":
+        if agent.session_manager.active_session_id is None:
+            return CommandResult("Start a conversation or use /new before compressing a session")
         compressed = await agent.session_manager.compress_now()
         if compressed:
-            return CommandResult("Current session completed")
+            return CommandResult("Current session compressed")
         return CommandResult("Nothing to compress yet; the session needs at least two messages")
     if command == "/consolidate":
         await get_consolidation_job().run()

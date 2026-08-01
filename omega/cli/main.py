@@ -1,7 +1,6 @@
 from __future__ import annotations
 import argparse
 import asyncio
-from code import interact
 from collections.abc import Sequence
 from omega import __version__
 from omega.cli.doctor import print_doctor_report, run_doctor

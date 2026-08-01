@@ -1,8 +1,6 @@
 from __future__ import annotations
 import asyncio
 import logging
-from contextlib import suppress
-from prompt_toolkit import key_binding
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
@@ -19,7 +17,7 @@ logger = logging.getLogger(__name__)
 _STYLE = Style.from_dict(
     {
         "header": "bg:#202a44 #f1f5f9 bold",
-        "status": "bg#172033 #a7f3d0",
+        "status": "bg:#172033 #a7f3d0",
         "input": "bg:#0f172a #f8fafc",
         "transcript": "bg:#0b1020 #e2e8f0",
     }
@@ -33,6 +31,8 @@ class OmegaTui:
         self.continue_next_turn = continue_session
         self.turn_task: asyncio.Task[None] | None = None
         self.state = "idle"
+        self.tool_round = 0
+        self.session_usage: dict[str, int] = {}
         self.transcript = Transcript()
         self.input = TextArea(
             prompt="> ",
@@ -43,7 +43,7 @@ class OmegaTui:
 
         key_bindings = KeyBindings()
 
-        @key_binding.add("c-c")
+        @key_bindings.add("c-c")
         def _interrupt(event) -> None:
             self.interrupt_turn()
 
@@ -68,12 +68,19 @@ class OmegaTui:
     def _header_text(self) -> str:
         session = self.agent.session_manager.active_session_id
         session_label = str(session)[:8] if session else "new"
-        return f" Omega  -  {omega_settings.llm_provider}/{omega_settings.llm_model}  -  session {session_label}"
+        token_count = sum(self.session_usage.values())
+        return (
+            f" Omega  -  {omega_settings.llm_provider}/{omega_settings.llm_model}"
+            f"  -  {token_count:,} streamed tokens  -  session {session_label}"
+        )
 
     def _status_text(self) -> str:
         if self.turn_task and not self.turn_task.done():
-            return " generating - Ctrl + C cancels this response - /commands for help"
-        return " idle - Enter sends - Ctrl+C cancels a response - /commands for help"
+            return (
+                f" generating - tools this turn {self.tool_round}"
+                " - Ctrl + C cancels - /commands for help"
+            )
+        return " idle - Enter sends - Ctrl+C exits - /commands for help"
 
     def _accept_input(self, buffer) -> bool:
         text = buffer.text.strip()
@@ -100,6 +107,9 @@ class OmegaTui:
     
     async def _handle_command(self, text: str) -> None:
         result = await handle_command(text, self.agent)
+        if text.strip().split(maxsplit=1)[0].lower() == "/new" and not result.should_exit:
+            self.session_usage.clear()
+            self.tool_round = 0
         if result.message:
             self.transcript.line(result.message)
         if result.should_exit:
@@ -108,6 +118,7 @@ class OmegaTui:
 
     async def _run_agent_turn(self, user_message: str) -> None:
         self.state = "generating"
+        self.tool_round = 0
         self.transcript.line(f"You: {user_message}")
         self.transcript.append("Omega: ")
         wrote_answer = False
@@ -121,6 +132,7 @@ class OmegaTui:
                     self.transcript.append(event.text)
                     wrote_answer = True
                 elif event.type == "tool_started" and event.tool_name:
+                    self.tool_round += 1
                     if wrote_answer:
                         self.transcript.line()
                     self.transcript.line(f"[tool] {event.tool_name}...")
@@ -129,6 +141,9 @@ class OmegaTui:
                     self.transcript.line(
                         f"[tool] {event.tool_name}: {event.summary or 'complete'}"
                     )
+                elif event.type == "turn_complete":
+                    for key, value in event.usage.items():
+                        self.session_usage[key] = self.session_usage.get(key, 0) + value
                 self.application.invalidate()
         except asyncio.CancelledError:
             if wrote_answer:
