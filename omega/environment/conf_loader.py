@@ -17,6 +17,7 @@ class OmegaSettings(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
     profile_inference_enabled: bool = True
     profile_inference_min_messages: int = 20
+    max_tool_rounds_per_turn: int = 5
     class Config:
         env_file = ".env"
         extra = "ignore"

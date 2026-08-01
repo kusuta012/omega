@@ -1,7 +1,11 @@
 import json
 import logging
+from collections.abc import AsyncIterator
+from nt import error
+from omega.agent.events import AgentEvent
 from omega.llm.client import get_llm_provider
 from omega.agent.tool_registry import ToolExecutor, TOOLS_OPENAI_FORMAT
+from omega.memory import loop_detector
 from omega.memory.session_manager import SessionManager
 from omega.memory.loop_detector import LoopDetector
 from omega.memory.context_build import EXEC_HARNESS
@@ -157,6 +161,211 @@ class AgentLoop:
                 messages.append({
                     "role": "tool", "tool_call_id": tc.id, "content": ephemeral_content 
                 })
+
+    async def process_stream(self, user_message: str, *, resume: bool = False) -> AsyncIterator[AgentEvent]:
+        await self.session_manager.ensure_session(resume=resume)
+        await self.session_manager.add_message("user", user_message)
+        system_context = self.session_manager.system_context
+        if system_context is None:
+            raise RuntimeError("session started without a system context")
+        conversation = await self.session_manager.get_context_messages()
+        messages = [{"role": "system", "content": system_context}] + conversation
+        tool_calls_log: list[dict] = []
+        all_sources: list[dict] = []
+        loop_detector = LoopDetector()
+        tool_round = 0
+        tool_results_seen_this_turn = False
+        turn_scratchpad: list[str] = []
+        turn_context = TurnContextManager()
+        total_usage: dict[str, int] = {}
+
+        while True:
+            current_system_content = system_context + "\n\n" + EXEC_HARNESS
+            if turn_scratchpad:
+                current_system_content += "\n\n[CURRENT SCRATCHPAD NOTES]\n" + "\n".join(
+                    f"- {note}" for note in turn_scratchpad
+                )
+            messages[0]["content"] = current_system_content
+            response_parts: list[str] = []
+            streamed_tool_calls = []
+            stream_finished = False
+            stream_usage: dict[str, int] = {}
+
+            async for event in self.llm_client.chat_with_tools_stream(
+                message=messages, tools=TOOLS_OPENAI_FORMAT
+            ):
+                if event.type == "text_delta":
+                    if event.text:
+                        response_parts.append(event.text)
+                        yield AgentEvent.text_delta(event.text)
+                elif event.type == "tool_call":
+                    if event.tool_call is None:
+                        raise RuntimeError("Provider emitted a tool event without a completed tool call")
+                    streamed_tool_calls.append(event.tool_call)
+                elif event.type == "message_end":
+                    stream_finsihed = True
+                    stream_usage.update(event.usage)
+
+            if not stream_finished:
+                raise RuntimeError("LLM stream ended without a completion event; assistant output was not saved")
+            for key, value in stream_usage.items():
+                total_usage[key] = total_usage.get(key, 0) + value
+
+            response_text = "".join(response_parts)
+            if not streamed_tool_calls:
+                answer = response_text or "I'm not sure how to respond to that"
+                if not response_text:
+                    yield AgentEvent.text_delta(answer)
+                await self.session_manager.add_message("assistant", answer)
+                await self.session_manager.check_and_compress(self.tools_schema_text)
+                await self._maybe_consolidate()
+                result = {
+                    "session_id": str(self.session_manager.active_session_id),
+                    "question": user_message,
+                    "answer": answer,
+                    "sources": all_sources,
+                    "tool_calls": tool_calls_log,
+                }
+                yield AgentEvent.turn_complete(result, total_usage)
+                return
+
+            tool_round += 1
+            if tool_round > omega_settings.max_tool_rounds_per_turn:
+                bail = (
+                    f"I've reached my limit of {omega_settings.max_tool_rounds_per_turn}"
+                    "tool-calling rounds, let me answer with what I have"
+                )
+                logger.warning(f"Hard tool-round cap hit {omega_settings.max_tool_rounds_per_turn, user_message[:80]}")
+                yield AgentEvent.text_delta(bail)
+                await self.session_manager.add_message("assistant", bail)
+                await self.session_manager.check_and_compress(self.tools_schema_text)
+                await self._maybe_consolidate()
+                result = {
+                    "session_id": str(self.session_manager.active_session_id),
+                    "question": user_message,
+                    "answer": bail,
+                    "sources": all_sources,
+                    "tool_calls": tool_calls_log,
+                }
+                yield AgentEvent.turn_complete(result, total_usage)
+                return
+
+            assistant_msg = {
+                "role": "assistant",
+                "content": response_text,
+                "tool_calls": [
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.name,
+                            "arguments": json.dumps(tool_call.arguments),
+                        },
+                    }
+                    for tool_call in streamed_tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
+            
+            if not response_text.strip():
+                logger.warning("structured reasoning enforcer: LLM emitted tool calls without visible reasoning")
+                error_message = (
+                    "[SYSTEM: You attempted to call a tool without explaining your reasoning first"
+                    "State your thought process and plan before calling any tools"
+                )
+                for tool_call in streamed_tool_calls:
+                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": error_message,
+                    })
+                continue
+
+            await self.session_manager.add_message("assistant", response_text)
+            safe_tool_calls = []
+            for tool_call in streamed_tool_calls:
+                if tool_results_seen_this_turn and tool_call.name == "remember":
+                    error_message = (
+                        "remember blocked: tool results exist since last user turn - safety rule prevents"
+                        "existing facts from search/KB output"
+                    )
+                    logger.warning(error_message)
+                    await self.session_manager.add_message("tool", error_message, tool_name="remember")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": error_message,
+                    })
+                    yield AgentEvent.tool_completed("remember", "blocked by memory safety rule")
+                    continue
+
+                if loop_detector.record_call(tool_call.name, tool_call.arguments):
+                    bail = "I noticed I was repeating the same operations, let me answer with what I have so far"
+                    yield AgentEvent.text_delta(bail)
+                    await self.session_manager.add_message("assistant", bail)
+                    await self.session_manager.check_and_compress(self.tools_schema_text)
+                    await self._maybe_consolidate()
+                    result = {
+                        "session_id": str(self.session_manager.active_session_id),
+                        "question": user_message,
+                        "answer": bail,
+                        "sources": all_sources,
+                        "tool_calls": tool_calls_log,
+                    }
+                    yield AgentEvent.turn_complete(result, total_usage)
+                    return
+                safe_tool_calls.append(tool_call)
+
+            async def run_tool(tool_call):
+                logger.info(f"Executing tool: {tool_call.name}({tool_call.arguments})")
+                try:
+                    result = await self.tool_executor.execute(
+                        tool_call.name, tool_call.arguments, turn_context=turn_context
+                    )
+                    return tool_call, result
+                except Exception as e:
+                    logger.error(f"Tool {tool_call.name} failed with an unhandled err: {e}")
+                    return tool_call, {
+                        "success": False,
+                        "error": str(e),
+                        "result_summary": f"Unhandled error: {e}"
+                    }
+            
+            for tool_call in safe_tool_calls:
+                yield AgentEvent.tool_started(tool_call.name)
+            executed_results = await asyncio.gather(*(run_tool(tool_call) for tool_call in safe_tool_calls))
+
+            for index, (tool_call, result) in enumerate(executed_results):
+                summary = result.get("result_summary", "no summary")
+                tool_calls_log.append({
+                    "tool": tool_call.name,
+                    "input": tool_call.arguments,
+                    "result_summary": summary,
+                })
+                tool_results_seen_this_turn = True
+                if result.get("sources"):
+                    all_sources.extend(result["sources"])
+                if result.get("scratchpad_note"):
+                    turn_scratchpad.append(result["scratchpad_note"])
+
+                raw_tool_content = result.get("answer", result.get("error", "No result"))
+                tool_content = turn_context.truncate_and_cache(tool_call.name, raw_tool_content)
+                await self.session_manager.add_message("tool", tool_content, tool_name=tool_call.name)
+                
+                ephemeral_content = tool_content
+                if index == len(executed_results) - 1:
+                    ephemeral_content += (
+                        f"\n\n[SYSTEM: You have completed {tool_round} of"
+                        f"{omega_settings.max_tool_rounds_per_turn} tool rounds. Evaluate the results above"
+                        "If you have enough information to fully answer the user, do so. If not state what is missing and use another tool"
+                    )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": ephemeral_content,
+                })
+                yield AgentEvent.tool_completed(tool_call.name, summary)
 
     async def new_session(self) -> str:
         return await self.session_manager.start_new_session()

@@ -1,11 +1,9 @@
-from ast import arguments
 import logging
 import json
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from readline import parse_and_bind
 from typing import Any
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, retry_if_exception_type
@@ -73,7 +71,7 @@ class OpenAICompatibleProvider(LLMProvider):
             if omega_settings.openrouter_app_url:
                 headers["HTTP-Referer"] = omega_settings.openrouter_app_url
             if omega_settings.openrouter_app_title:
-                headers["X-title"] = omega_settings.openrouter_app_title
+                headers["X-Title"] = omega_settings.openrouter_app_title
         return headers
 
     def _tool_payload(
@@ -142,7 +140,7 @@ class OpenAICompatibleProvider(LLMProvider):
             json.loads(content)
             return content
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400:
+            if e.response.status_code != 400:
                 raise
             logger.warning("JSON mode not supported by this model/provider, falling back to regex extraction")
         except json.JSONDecodeError:
@@ -190,7 +188,7 @@ class OpenAICompatibleProvider(LLMProvider):
     def _parse_tool_calls(raw_calls: list[dict[str, Any]]) -> list[ToolCall]:
         parsed: list[ToolCall] = []
         for raw_call in raw_calls:
-            function = raw_calls.get("function") or {}
+            function = raw_call.get("function") or {}
             raw_arguments = function.get("arguments", "{}")
             try:
                 arguments = json.loads(raw_arguments)
@@ -323,7 +321,7 @@ class AnthropicProvider(LLMProvider):
             
             if role == "assistant" and message.get("tool_calls"):
                 blocks: list[dict[str, Any]] = []
-                if messages.get("content"):
+                if message.get("content"):
                     blocks.append({"type": "text", "text": message["content"]})
                 for raw_call in message["tool_calls"]:
                     function = raw_call.get("function") or {}
