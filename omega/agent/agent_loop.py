@@ -190,7 +190,7 @@ class AgentLoop:
             stream_usage: dict[str, int] = {}
 
             async for event in self.llm_client.chat_with_tools_stream(
-                message=messages, tools=TOOLS_OPENAI_FORMAT
+                messages=messages, tools=TOOLS_OPENAI_FORMAT
             ):
                 if event.type == "text_delta":
                     if event.text:
@@ -201,7 +201,7 @@ class AgentLoop:
                         raise RuntimeError("Provider emitted a tool event without a completed tool call")
                     streamed_tool_calls.append(event.tool_call)
                 elif event.type == "message_end":
-                    stream_finsihed = True
+                    stream_finished = True
                     stream_usage.update(event.usage)
 
             if not stream_finished:
