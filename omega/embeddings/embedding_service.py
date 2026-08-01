@@ -10,7 +10,15 @@ class EmbeddingService:
         model_name = model_name or omega_settings.embedding_model
         logger.info(f"Loading local embedding model {model_name}")
         self.model = SentenceTransformer(model_name)
-        get_dim = getattr(self.model, "get_embedding_dim", None) or getattr(self.model, "get_sentence_embedding_dim")
+        get_dim = getattr(self.model, "get_embedding_dimension", None)
+        if not callable(get_dim):
+            get_dim = getattr(self.model, "get_sentence_embedding_dimension", None)
+        if not callable(get_dim):
+            get_dim = getattr(self.model, "get_embedding_dim", None)
+        if not callable(get_dim):
+            raise RuntimeError(
+                f"Embedding model '{model_name}' does not expose an embedding-dimension method"
+            )
         self.dim = get_dim()
         if self.dim != EMBEDDING_DIM:
             raise RuntimeError(

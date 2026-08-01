@@ -1,11 +1,9 @@
 import json
 import logging
 from collections.abc import AsyncIterator
-from nt import error
 from omega.agent.events import AgentEvent
 from omega.llm.client import get_llm_provider
 from omega.agent.tool_registry import ToolExecutor, TOOLS_OPENAI_FORMAT
-from omega.memory import loop_detector
 from omega.memory.session_manager import SessionManager
 from omega.memory.loop_detector import LoopDetector
 from omega.memory.context_build import EXEC_HARNESS

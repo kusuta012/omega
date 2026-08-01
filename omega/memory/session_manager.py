@@ -1,6 +1,4 @@
 import logging
-
-from sympy.interactive import session
 from omega.storage.memory_queries import (
     create_session,
     find_resumable_session,
@@ -142,7 +140,7 @@ class SessionManager:
         return [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")]
 
     async def check_and_compress(self, tool_schemas_text: str = ""):
-        messages = await get_session_messages(self._require_active_session_id)
+        messages = await get_session_messages(self._require_active_session_id())
         if len(messages) < 4:
             return
 
@@ -160,6 +158,13 @@ class SessionManager:
                 await self._compress(messages, aggressive=False)
         except Exception as e:
             logger.error(f"Compression failed: {e}")
+    
+    async def compress_now(self, aggressive: bool = False) -> bool:
+        messages = await get_session_messages(self._require_active_session_id())
+        if len(messages) < 2:
+            return False
+        await self._compress(messages, aggressive=aggressive)
+        return True
 
     async def _compress(self, messages: list[dict], aggressive: bool = False):
         tail_budget = omega_settings.tail_preserve_tokens

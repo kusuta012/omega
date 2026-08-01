@@ -15,7 +15,7 @@ from omega.embeddings.embedding_service import get_embedding_service
 from omega.llm.client import get_llm_provider
 from omega.memory.core import read_memory_md, read_user_md
 from omega.environment.conf_loader import omega_settings
-from omega.memory.profile_infer import append_section_to_profile, safe_auto_write, append_tsection_to_profile
+from omega.memory.profile_infer import append_section_to_profile, safe_auto_write
 
 logger = logging.getLogger("Consolidation")
 

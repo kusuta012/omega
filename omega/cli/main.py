@@ -6,6 +6,7 @@ from omega import __version__
 from omega.cli.doctor import print_doctor_report, run_doctor
 from omega.cli.log_viewer import show_logs
 from omega.cli.logging_config import configure_logging
+from omega.cli.repl import run_repl
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -22,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cli",
-        action="store_tube",
+        action="store_true",
         help="Use the scrolling REPL instead of the full-screen TUI",
     )
 
@@ -36,8 +37,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _interactive_not_ready(parser: argparse.ArgumentParser) -> int:
     parser.error(
-        "The interactive client I will do next block :)"
-        "Use 'omega doctor' or 'omega logs' for currently available commands."
+        "The full-screen TUI is not available yet, Use 'omega --cli for the streaming"
+        "terminal interface or 'omega doctor' / 'omega logs' for currently available commands."
     )
     return 2
 
@@ -54,6 +55,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
             return 2
+    if args.cli:
+        return asyncio.run(run_repl(continue_session=args.continue_session))
+    if args.continue_session:
+        parser.error("--continue requires the available interactive client: omega --cli --continue")
+        return 2
 
     return _interactive_not_ready(parser)
 
