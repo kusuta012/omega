@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 from collections.abc import AsyncIterator
 from omega.agent.events import AgentEvent
 from omega.llm.client import get_llm_provider
@@ -12,7 +13,8 @@ from omega.environment.conf_loader import omega_settings
 from omega.memory.turn_context import TurnContextManager
 from omega.memory.provenance import DURABLE_MEMORY_TOOLS, DirectUserProvenance
 from omega.memory.session_locks import session_turn_locks
-import asyncio
+from omega.agent.turn_exec import TurnExecutionState
+
 
 logger = logging.getLogger("AgentLoop")
 
@@ -47,9 +49,11 @@ class AgentLoop:
         tool_results_seen_this_turn = False
         turn_scratchpad = []
         turn_context = TurnContextManager()
+        execution_state = TurnExecutionState(user_message)
 
         while True:
             current_system_content = system_context + "\n\n" + EXEC_HARNESS
+            current_system_content += "\n\n[PRIVATE TURN EXECUTION STATE]\n" + execution_state.decision_context()
             if turn_scratchpad:
                 scratchpad_text = "\n\n[CURRENT SCRATCHPAD NOTES]\n" + "\n".join(f"- {note}" for note in turn_scratchpad)
                 current_system_content += scratchpad_text
@@ -96,22 +100,6 @@ class AgentLoop:
 
             tool_decision_text = response.content or ""
 
-
-            if response.tool_calls and not tool_decision_text.strip():
-                logger.warning("Structured Reasoning Enforcer: LLM emitted tool call without CoT monologue. Intercepting.")
-                err_msg = "[SYSTEM REJECTION: You attempted to call a tool without explaining your reasoning first. State your thought process and plan before calling any tools.]"
-                await self.session_manager.add_message(
-                    "assistant", tool_decision_text, metadata={"tool_calls": assistant_msg["tool_calls"]}
-                )
-                for tc in response.tool_calls:
-                    await self.session_manager.add_message("tool", err_msg, tool_name=tc.name, metadata={"tool_call_id": tc.id})
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": err_msg
-                    })
-                continue
-
             await self.session_manager.add_message("assistant", tool_decision_text, metadata={"tool_calls": assistant_msg["tool_calls"]})
 
             safe_tool_calls = []
@@ -119,8 +107,11 @@ class AgentLoop:
                 if tool_results_seen_this_turn and tc.name in DURABLE_MEMORY_TOOLS:
                     err = f"{tc.name} blocked: tool results exist since the current user message"
                     logger.warning(err)
-                    await self.session_manager.add_message("tool", err, tool_name=tc.name)
+                    await self.session_manager.add_message("tool", err, tool_name=tc.name, metadata={"tool_call_id": tc.id})
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": err})
+                    execution_state.record_tool_result(
+                        tc.name, {"success": False, "error": err, "results_summary": err}
+                    )
                     continue
 
                 if loop_detector.record_call(tc.name, tc.arguments):
@@ -154,6 +145,7 @@ class AgentLoop:
                     "result_summary": result.get("result_summary", "no summary")
                 })
                 tool_results_seen_this_turn = True
+                execution_state.record_tool_result(tc.name, result)
 
                 if result.get("sources"):
                     all_sources.extend(result["sources"])
