@@ -164,9 +164,8 @@ class SessionManager:
         if len(messages) < 2:
             return False
         await self._compress(messages, aggressive=aggressive)
-        return True
 
-    async def _compress(self, messages: list[dict], aggressive: bool = False):
+    async def _compress(self, messages: list[dict], aggressive: bool = False) -> bool:
         tail_budget = omega_settings.tail_preserve_tokens
         if aggressive:
             tail_budget = tail_budget // 2
@@ -180,15 +179,15 @@ class SessionManager:
                 break
             tail_tokens += msg_tokens
 
-        if tail_start_idx <= 1:
+        if tail_start_idx == len(messages) or tail_start_idx <= 1:
             logger.warning(
                 "nothing to compress - tail covers almost entire conversation"
             )
-            return
+            return False
 
         compress_span = messages[:tail_start_idx]
         if not compress_span:
-            return
+            return False
 
         pruned_count = 0
         for msg in compress_span:
@@ -223,6 +222,7 @@ class SessionManager:
             f"Compressed {len(compress_span)} messages into summary"
             f"(pruned {pruned_count} tool outputs, aggressive={aggressive})"
         )
+        return True
 
     def _format_message_for_summary(self, messages: list[dict]) -> str:
         lines = []

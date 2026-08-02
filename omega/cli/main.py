@@ -11,6 +11,7 @@ from omega.cli.repl import run_repl
 from omega.cli.tui import run_tui
 from omega.cli.config_wizard import run_config
 from omega.cli.setup_wizard import run_setup
+from omega.storage.postgres_session import db_pool
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -44,6 +45,13 @@ def _build_parser() -> argparse.ArgumentParser:
     logs_parser.add_argument("--lines", type=int, default=100, help="Number of recent lines to show.")
     return parser
 
+async def _run_with_database(coroutine) -> int:
+    await db_pool.connect()
+    try:
+        return await coroutine
+    finally:
+        await db_pool.disconnect()
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -67,8 +75,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(str(exc))
             return 2
     if args.cli:
-        return asyncio.run(run_repl(continue_session=args.continue_session))
-    return asyncio.run(run_tui(continue_session=args.continue_session))
+        return asyncio.run(_run_with_database(run_repl(continue_session=args.continue_session)))
+    return asyncio.run(_run_with_database(run_tui(continue_session=args.continue_session)))
 
 
 if __name__ == "__main__":

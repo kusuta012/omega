@@ -3,10 +3,15 @@ import asyncio
 import subprocess
 import sys
 from omega.agent.agent_loop import AgentLoop
+from omega.storage.postgres_session import db_pool
 
 async def create_new_session() -> str:
-    agent = AgentLoop()
-    return await agent.new_session()
+    await db_pool.connect()
+    try:
+        agent = AgentLoop()
+        return await agent.new_session()
+    finally:
+        await db_pool.disconnect()
 
 def run_new_session() -> int:
     try:
