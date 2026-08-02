@@ -4,6 +4,13 @@ from omega.storage.postgres_session import db_pool
 
 logger = logging.getLogger("MemoryQueries")
 
+def _message_from_row(row) -> dict:
+    message = dict(row)
+    metadata = message.get("metadata")
+    if isinstance(metadata, str):
+        message["metadata"] = json.loads(metadata)
+    return message
+
 async def create_session() -> str:
     async with db_pool.acquire() as conn:
         session_id = await conn.fetchval(
@@ -107,7 +114,7 @@ async def get_session_messages(session_id: str, include_compressed: bool = False
                 "WHERE session_id = $1 AND compressed = FALSE ORDER BY created_at ASC",
                 session_id
             )
-    return [dict(r) for r in rows]
+    return [_message_from_row(row) for row in rows]
 
 async def get_message_span(session_id: str, before_timestamp) -> list[dict]:
     async with db_pool.acquire() as conn:
@@ -116,7 +123,7 @@ async def get_message_span(session_id: str, before_timestamp) -> list[dict]:
             "WHERE session_id = $1 AND created_at < $2 ORDER BY created_at ASC",
             session_id, before_timestamp
         )
-    return [dict(r) for r in rows]
+    return [_message_from_row(row) for row in rows]
 
 async def mark_messages_compressed(message_ids: list[str]):
     async with db_pool.acquire() as conn:

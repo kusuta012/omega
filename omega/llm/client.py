@@ -76,7 +76,7 @@ def _provider_safe_tool_history(messages: list[dict]) -> list[dict]:
         for call in tool_calls:
             function = call.get("function") if isinstance(call, dict) else None
             call_id = str(call.get("id", "")) if isinstance(call, dict) else ""
-            if not call_id or not call_id in call_ids or not isinstance(function, dict):
+            if not call_id or call_id in call_ids or not isinstance(function, dict):
                 valid_declaration = False
                 break
             if not isinstance(function.get("name"), str) or not function["name"]:

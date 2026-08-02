@@ -17,7 +17,7 @@ class DatabasePool:
         async with self._lifecycle_lock:
             if self.pool is not None:
                 pool, self.pool = self.pool, None
-                await self.pool.close()
+                await pool.close()
 
     @asynccontextmanager
     async def acquire(self):

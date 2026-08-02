@@ -176,11 +176,6 @@ class SessionManager:
                     "tool_call_id": metadata["tool_call_id"],
                     "content": message["content"],
                 })
-        context.extend(
-            {"role": message["role"], "content": message["content"]}
-            for message in messages
-            if message["role"] in ("user", "assistant")
-        )
         return context
 
     async def check_and_compress(self, tool_schemas_text: str = ""):
