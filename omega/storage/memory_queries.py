@@ -6,15 +6,11 @@ logger = logging.getLogger("MemoryQueries")
 
 async def create_session() -> str:
     async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "UPDATE sessions SET status = 'closed', ended_at = now() WHERE status = 'active'"
-            )
-            session_id = await conn.fetchval(
-                "INSERT INTO sessions (status) VALUES ('active') RETURNING id"
-            )
+        session_id = await conn.fetchval(
+            "INSERT INTO sessions (status) VALUES ('active') RETURNING id"
+        )
     logger.info(f"Created new session {session_id}")
-    return session_id
+    return str(session_id)
 
 async def get_active_session() -> dict | None:
     async with db_pool.acquire() as conn:
@@ -36,6 +32,14 @@ async def find_resumable_session() -> dict | None:
             ORDER BY ended_at DESC NULLS LAST, started_at DESC
             LIMIT 1
         """)
+    return dict(row) if row else None
+
+async def get_session(session_id: str) -> dict | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, status, started_at, ended_at FROM sessions WHERE id = $1",
+            session_id,
+        )
     return dict(row) if row else None
 
 async def reopen_session(session_id: str) -> bool:
@@ -76,7 +80,7 @@ async def close_session(session_id: str):
 async def append_message(session_id: str, role: str, content: str, tool_name: str = None) -> str:
     async with db_pool.acquire() as conn:
         message_id = await conn.fetchval(
-            "INSERT INTO messages (session_id, role, content, tool_name) VALUES ($1 $2, $3, $4) RETURNING id",
+            "INSERT INTO messages (session_id, role, content, tool_name) VALUES ($1, $2, $3, $4) RETURNING id",
             session_id,
             role,
             content,

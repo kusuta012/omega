@@ -22,11 +22,11 @@ class AgentLoop:
         self.session_manager = SessionManager()
         self.tools_schema_text = json.dumps(TOOLS_OPENAI_FORMAT)
 
-    async def process(self, user_message: str) -> dict:
-        await self.session_manager.ensure_session()
+    async def process(self, user_message: str, *, session_id: str | None = None) -> dict:
+        await self.session_manager.ensure_session(session_id=session_id)
         user_message_id = await self.session_manager.add_message("user", user_message)
         memory_provenance = DirectUserProvenance(
-            sesssion_id=str(self.session_manager.active_session_id),
+            session_id=str(self.session_manager.active_session_id),
             message_id=user_message_id,
             user_message=user_message,
         )
@@ -297,7 +297,6 @@ class AgentLoop:
                 if tool_results_seen_this_turn and tool_call.name in DURABLE_MEMORY_TOOLS:
                     error_message = (
                         f"{tool_call.name} blocked: tool results exist since the current user message"
-                        "existing facts from search/KB output"
                     )
                     logger.warning(error_message)
                     await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name)
@@ -306,7 +305,7 @@ class AgentLoop:
                         "tool_call_id": tool_call.id,
                         "content": error_message,
                     })
-                    yield AgentEvent.tool_completed("remember", "blocked by memory safety rule")
+                    yield AgentEvent.tool_completed(tool_call.name, "blocked by memory safety rule")
                     continue
 
                 if loop_detector.record_call(tool_call.name, tool_call.arguments):
@@ -375,6 +374,9 @@ class AgentLoop:
                     "content": ephemeral_content,
                 })
                 yield AgentEvent.tool_completed(tool_call.name, summary)
+
+    async def close_session(self):
+        await self.session_manager.close_current_session()
 
     async def new_session(self) -> str:
         return await self.session_manager.start_new_session()

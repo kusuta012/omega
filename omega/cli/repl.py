@@ -59,6 +59,7 @@ async def run_repl(*, continue_session: bool = False) -> int:
         try:
             user_message = input("\nYou: ").strip()
         except EOFError:
+            await agent.close_session()
             print("\nGoodbye.")
             return 0
         except KeyboardInterrupt:
@@ -77,6 +78,7 @@ async def run_repl(*, continue_session: bool = False) -> int:
             if result.message:
                 print(result.message)
             if result.should_exit:
+                await agent.close_session()
                 return 0
             continue
 

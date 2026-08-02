@@ -1,4 +1,5 @@
 import logging
+from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from omega.agent.agent_loop import AgentLoop
@@ -6,10 +7,12 @@ from omega.agent.agent_loop import AgentLoop
 logger = logging.getLogger("AgentEndpoint")
 router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 
-agent_loop = AgentLoop()
-
 class AgentRequest(BaseModel):
     message: str = Field(..., description="Natural language prompt for the agent")
+    session_id: UUID | None = Field(
+        default=None,
+        description="Session capability returned by a previous agent response"
+    )
 
 class ToolCallLog(BaseModel):
     tool: str
@@ -29,10 +32,17 @@ async def handle_agent_request(req: AgentRequest):
         raise HTTPException(status_code=400, detail="message cannot be empty")
 
     logger.info(f"Received agent request: '{req.message}'")
-    result = await agent_loop.process(req.message)
-    return result
+    agent = AgentLoop()
+    try:
+        return await agent.process(
+            req.message,
+            session_id=str(req.session_id) if req.session_id is not None else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 @router.post("/new")
 async def start_new_session():
-    session_id = await agent_loop.new_session()
+    agent = AgentLoop()
+    session_id = await agent.new_session()
     return {"message": "New session started", "session_id": str(session_id)}

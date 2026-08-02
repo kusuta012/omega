@@ -1,6 +1,7 @@
 import logging
 from omega.storage.memory_queries import (
     create_session,
+    get_session,
     find_resumable_session,
     reopen_session,
     close_session,
@@ -52,7 +53,9 @@ class SessionManager:
             raise RuntimeError("No active session is available")
         return self.active_session_id
 
-    async def ensure_session(self, resume: bool = False) -> str:
+    async def ensure_session(self, resume: bool = False, session_id: str | None = None) -> str:
+        if session_id is not None:
+            return await self.attach_session(session_id)
         if self.active_session_id:
             return self.active_session_id
         if resume:
@@ -60,10 +63,24 @@ class SessionManager:
             if resume_session_id:
                 return resume_session_id
 
-        await self._recover_orphaned_sessions()
         self.active_session_id = await create_session()
         self.system_context = await build_system_context()
         logger.info(f"Session started: {self.active_session_id}")
+        return self.active_session_id
+
+    async def attach_session(self, session_id: str) -> str:
+        if self.active_session_id and self.active_session_id != session_id:
+            raise RuntimeError("This agent instance is already bound to another session")
+
+        session = await get_session(session_id)
+        if session is None:
+            raise ValueError("Unknown session_id")
+        if session["status"] == "closed":
+            await reopen_session(session_id)
+
+        self.active_session_id = str(session["id"])
+        self.system_context = await build_system_context()
+        logger.info(f"Attached to session {session_id}")
         return self.active_session_id
 
     async def resume_latest_session(self) -> str | None:
@@ -76,7 +93,6 @@ class SessionManager:
             return None
 
         session_id = str(candidate["id"])
-        await self._recover_orphaned_sessions(exclude_session_id=session_id)
 
         reopened = await reopen_session(session_id)
         if not reopened:

@@ -168,7 +168,10 @@ class OmegaTui:
         if self.continue_next_turn:
             self.transcript.line("The next message will resume the latest available session")
         self.transcript.line()
-        return await self.application.run_async()
+        try:
+            return await self.application.run_async()
+        finally:
+            await self.agent.close_session()
 
 
 async def run_tui(*, continue_session: bool = False) -> int:
