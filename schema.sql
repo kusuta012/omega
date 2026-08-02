@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS VECTOR;
 
-CREATE TABLE items (
+CREATE TABLE IF NOT EXISTS items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_type TEXT NOT NULL,
     source_ref TEXT,
@@ -11,7 +11,7 @@ CREATE TABLE items (
     content_hash VARCHAR(64) unique
 );
 
-CREATE TABLE chunks (
+CREATE TABLE IF NOT EXISTS chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     item_id UUID REFERENCES items(id) ON DELETE CASCADE,
     chunk_index INT,
@@ -20,7 +20,7 @@ CREATE TABLE chunks (
     created_at TIMESTAMP DEFAULT now()
 );
 
-CREATE TABLE jobs (
+CREATE TABLE IF NOT EXISTS jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     item_id UUID REFERENCES items(id) ON DELETE CASCADE,
     job_type TEXT,
@@ -31,7 +31,7 @@ CREATE TABLE jobs (
     updated_at TIMESTAMP DEFAULT now()
 );
 
-CREATE TABLE digests (
+CREATE TABLE IF NOT EXISTS digests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     period_start TIMESTAMP,
     period_end TIMESTAMP,
@@ -39,17 +39,17 @@ CREATE TABLE digests (
     created_at TIMESTAMP DEFAULT now()
 );
 
-CREATE INDEX idx_chunks_item_id ON chunks(item_id);
-CREATE INDEX idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_chunks_item_id ON chunks(item_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     started_at TIMESTAMP DEFAULT now(),
     ended_at TIMESTAMP,
     status TEXT DEFAULT 'active'
 );
 
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
     role TEXT NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE messages (
     compressed BOOLEAN DEFAULT FALSE
 );
 
-CREATE TABLE memory_entries (
+CREATE TABLE IF NOT EXISTS memory_entries (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     memory_type TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -74,6 +74,6 @@ CREATE TABLE memory_entries (
     metadata JSONB
 );
 
-CREATE INDEX idx_messages_session ON messages(session_id, created_at);
-CREATE INDEX idx_memory_type_date ON memory_entries(memory_type, occurred_at);
-CREATE INDEX idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_type_date ON memory_entries(memory_type, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);
