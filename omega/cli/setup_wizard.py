@@ -3,35 +3,41 @@ import asyncio
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
+from importlib import resources
 from pathlib import Path
 import asyncpg
 from omega.cli.configuration import prompt_llm_settings, read_env, validate_llm_settings, write_env
 from omega.embeddings.embedding_service import EMBEDDING_DIM, get_embedding_service
 from omega.environment.conf_loader import omega_settings
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATABASE_SERVICE = "omega_db"
 _DATABASE_START_TIMEOUT = 45
 
-
-def _start_bundled_database() -> None:
+@contextmanager
+def _bundled_files():
+    assets = resources.files("omega").joinpath("resources")
+    with resources.as_file(assets.joinpath("docker-compose.yml")) as compose_file, resources.as_file(assets.joinpath("schema.sql")) as schema_file:
+        yield compose_file, schema_file
+        
+def _start_bundled_database(compose_file: Path) -> None:
     if shutil.which("docker") is None:
         raise RuntimeError(
             "Docker is required for Omega. Install Docker and Docker compose, then rerun omega setup"
         )
-    compose_file = _PROJECT_ROOT / "docker-compose.yml"
+
     if not compose_file.is_file():
         raise RuntimeError(f"Bundled Docker Compose file is missing: {compose_file}")
 
     try:
         subprocess.run(
             ["docker", "compose", "up", "-d", _DATABASE_SERVICE],
-            cwd=_PROJECT_ROOT,
+            cwd=compose_file.parent,
             check=True,
         )
     except (OSError, subprocess.CalledProcessError) as ex:
         raise RuntimeError(
-            "could not start omega's database with Docker Compose. "
+            "Could not start omega's database with Docker Compose. "
             "Ensure Docker is running, then rerun omega setup."
         ) from ex
 
@@ -51,12 +57,12 @@ async def _connect_database() -> asyncpg.Connection:
         f"{_DATABASE_START_TIMEOUT} seconds: {last_error}"
     )
 
-def _apply_schema() -> None:
+def _apply_schema(schema_file: Path) -> None:
     async def apply() -> None:
         connection = await _connect_database()
         try:
             await connection.execute(
-                (_PROJECT_ROOT / "schema.sql").read_text(encoding="utf-8")
+                schema_file.read_text(encoding="utf-8")
             )
         finally:
             await connection.close()
@@ -65,10 +71,11 @@ def _apply_schema() -> None:
 def run_setup() -> int:
     existing = read_env()
     try:
-        print("Starting Omega's database")
-        _start_bundled_database()
-        print("Applying database schema")
-        _apply_schema()
+        with _bundled_files() as (compose_file, schema_file):
+            print("Starting Omega's database")
+            _start_bundled_database(compose_file)
+            print("Applying database schema")
+            _apply_schema(schema_file)
         settings = prompt_llm_settings(existing)
         print("Validating LLM settings...")
         asyncio.run(validate_llm_settings(settings["LLM_PROVIDER"], settings["LLM_BASE_URL"], settings["LLM_API_KEY"], settings["LLM_MODEL"]))

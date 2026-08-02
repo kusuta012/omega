@@ -26,3 +26,6 @@ omega = "omega.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["omega*"]
+
+[tool.setuptools.package-data]
+omega = ["resources/*.sql", "resources/*.yml"]
