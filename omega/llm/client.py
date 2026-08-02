@@ -301,12 +301,12 @@ class AnthropicProvider(LLMProvider):
             for tool in tools
         ]
 
-        system_text: str | None = None
+        system_parts: list[str] = []
         anthropic_messages: list[dict[str, Any]] = []
         for message in messages:
             role = message["role"]
             if role == "system":
-                system_text = message["content"]
+                system_parts.append(message["content"])
                 continue
             if role == "tool":
                 anthropic_messages.append({
@@ -359,8 +359,8 @@ class AnthropicProvider(LLMProvider):
             "temperature": 0.3,
             "max_tokens": 2048,
         }
-        if system_text:
-            payload["system"] = system_text
+        if system_parts:
+            payload["system"] = "\n\n".join(system_parts)
         if anthropic_tools:
             payload["tools"] = anthropic_tools
         return payload

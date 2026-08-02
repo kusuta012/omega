@@ -25,7 +25,7 @@ def was_man_edited(file_stem: str) -> tuple[bool, str]:
     if not path.exists():
         return False, f"{file_stem}.md does not exist yet"
 
-    current_hash = _compute_hash(path.read_text)
+    current_hash = _compute_hash(path.read_text(encoding="utf-8"))
 
     if not hash_path.exists():
         hash_path.write_text(current_hash)

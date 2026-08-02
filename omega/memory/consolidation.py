@@ -44,7 +44,7 @@ Return ONLY a JSON object with this exact structure (no explanations, no markdow
     "core_entry_ids": ["uuid1", "uuid2", "uuid3"]
 }"""
 
-PROFILE_PROMPT = """You are omega's profile curator. Review the recent session below and identify any new information about the USER that should be added to USER.md
+PROFILE_PROMPT = f"""You are omega's profile curator. Review the recent session below and identify any new information about the USER that should be added to USER.md
 Your notes about who the user is and how to interact with them.
 
 USER.md should contain:
@@ -68,15 +68,15 @@ identify details the user has shared, or explicit preferences they've stated.
 If nothing new should be added, return an empty updates list.
 
 Return ONLY a JSON object with this structure:
-{
+{{
     "updates": [
-        {
+        {{
             "section_title": "Communication Style",
             "content": "The user consistently sends very short, direct messages. They prefer brief answers and seem to get annoyed by long explanations. Keep responses to 1-3 sentences unless asked for detail"
-        }
+        }}
     ],
     "observations": "Brief note about overall communication patterns observed"
-}
+}}
 
 Rules:
 - Each update should be a natural-language note to yourself, not structured data
@@ -119,7 +119,7 @@ class ConsolidationJob:
         pattern_result = await self._identify_patterns_and_core(entries, merge_map)
         core_ids = pattern_result.get("core_entry_ids", [])
         await self._write_memory_md(entries, core_ids, merge_map)
-        await self._regenerate_user_md()
+        await self._reflect_profile()
         await mark_entries_consolidated(entry_ids)
         patterns = pattern_result.get("patterns", [])
         if patterns and patterns != ["No clear patterns yet."]:
@@ -349,7 +349,7 @@ class ConsolidationJob:
             messages_text = self._format_msgs_refl(recent_msgs)
             prompt = PROFILE_PROMPT.format(
                 current_user_md=current_user_md,
-                messages_text=messages_text,
+                recent_session=messages_text,
             )
 
             response = await self.llm_client.generate_json(prompt, "")

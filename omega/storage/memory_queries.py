@@ -147,6 +147,18 @@ async def get_recent_session_summaries(limit: int = 2) -> list[dict]:
         """, limit)
     return [dict(r) for r in rows]
 
+async def get_session_compression_summaries(session_id: str) -> list[dict]:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT content, created_at, metadata
+            FROM memory_entries
+            WHERE memory_type = 'session_summary'
+              AND source_session_id = $1
+              AND metadata->>'trigger' IN ('standard_compression', 'emergency_compression')
+            ORDER BY created_at ASC
+        """, session_id)
+    return [dict(row) for row in rows]
+
 async def record_memory_access(entry_id: str):
     async with db_pool.acquire() as conn:
         await conn.execute("""

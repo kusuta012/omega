@@ -9,6 +9,7 @@ from omega.storage.memory_queries import (
     store_memory_entry,
     mark_messages_compressed,
     get_message_span,
+    get_session_compression_summaries,
     find_orphaned_sessions
 )
 from omega.memory.context_build import estimate_tokens, build_system_context
@@ -99,7 +100,7 @@ class SessionManager:
         if not self.active_session_id:
             return
 
-        messages = await get_session_messages(self.active_session_id)
+        messages = await get_session_messages(self.active_session_id, include_compressed=True)
         if len(messages) >= 2:
             try:
                 await self._create_session_summary(messages)
@@ -136,8 +137,19 @@ class SessionManager:
         await append_message(self._require_active_session_id(), role, content, tool_name)
 
     async def get_context_messages(self) -> list[dict]:
-        messages = await get_session_messages(self._require_active_session_id())
-        return [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] in ("user", "assistant")]
+        session_id = self._require_active_session_id()
+        summaries = await get_session_compression_summaries(session_id)
+        messages = await get_session_messages(session_id)
+        context = []
+        if summaries:
+            summary_text = "\n\n".join(summary["content"] for summary in summaries)
+            context.append({"role": "system", "content": f"Earlier in this session:\n{summary_text}"})
+        context.extend(
+            {"role": message["role"], "content": message["content"]}
+            for message in messages
+            if message["role"] in ("user", "assistant")
+        )
+        return context
 
     async def check_and_compress(self, tool_schemas_text: str = ""):
         messages = await get_session_messages(self._require_active_session_id())
@@ -163,7 +175,7 @@ class SessionManager:
         messages = await get_session_messages(self._require_active_session_id())
         if len(messages) < 2:
             return False
-        await self._compress(messages, aggressive=aggressive)
+        return await self._compress(messages, aggressive=aggressive)
 
     async def _compress(self, messages: list[dict], aggressive: bool = False) -> bool:
         tail_budget = omega_settings.tail_preserve_tokens
@@ -207,6 +219,8 @@ class SessionManager:
             source_session_id=self._require_active_session_id(),
             metadata={
                 "message_count": len(compress_span),
+                "first_message_id": str(compress_span[0]["id"]),
+                "last_message_id": str(compress_span[-1]["id"]),
                 "trigger": "emergency_compression"
                 if aggressive
                 else "standard_compression",
