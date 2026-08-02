@@ -52,7 +52,36 @@ def is_retryable_http_error(exception: BaseException) -> bool:
         return exception.response.status_code not in (400, 404)
     return isinstance(exception, httpx.RequestError)
 
-
+def _provider_safe_tool_history(messages: list[dict]) -> list[dict]:
+    safe_messages: list[dict] = []
+    pending_tool_call_ids: set[str] = set()
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant" and message.get("tool_calls"):
+            tool_calls = message["tool_calls"]
+            if not isinstance(tool_calls, list):
+                logger.warning("dropping malformed assistant tool declaration")
+                continue
+            call_ids = {
+                str(call.get("id"))
+                for call in tool_calls
+                if isinstance(call, dict) and call.get("id")
+            }
+            if not call_ids:
+                logger.warning("dropping assistant tool declaration without call ids")
+                continue
+            pending_tool_call_ids.update(call_ids)
+            safe_messages.append(message)
+            continue
+        if role == "tool":
+            tool_call_id = str(message.get("tool_call_id", ""))
+            if tool_call_id not in pending_tool_call_ids:
+                logger.warning("dropping orphaned tool result from provider history")
+                continue
+            safe_messages.append(message)
+            continue
+        safe_messages.append(message)
+    return safe_messages
 
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(self):
@@ -77,7 +106,7 @@ class OpenAICompatibleProvider(LLMProvider):
     def _tool_payload(
         self, messages: list[dict], tools: list[dict], tool_results: list[dict] | None
     ) -> dict[str, Any]:
-        all_messages = list(messages)
+        all_messages = _provider_safe_tool_history(messages)
         if tool_results:
             for result in tool_results:
                 all_messages.append({
@@ -206,6 +235,7 @@ class OpenAICompatibleProvider(LLMProvider):
         payload["stream"] = True
         accumulator = ToolCallAccumulator()
         finish_reason = "stop"
+        terminal_event_received = False
         usage: dict[str, int] = {}
         emitted_content = False
 
@@ -241,16 +271,20 @@ class OpenAICompatibleProvider(LLMProvider):
                             accumulator.add_openai_delta(raw_call)
                         if choice.get("finish_reason"):
                             finish_reason = str(choice["finish_reason"])
+                            terminal_event_received = True
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (400, 404) and tools:
-                    message = (
-                        "Error: The currently selected LLM model does not support native tool-calling, Please switch to a supported model"
-                    )
                     logger.error(f"streaming tool calling failed {e.response.status_code}:{e.response.text}")
-                    yield StreamEvent.text_delta(message)
-                    yield StreamEvent.message_end("stop")
-                    return
+                    raise StreamProtocolError(
+                        "The currently selected LLM model does not support native tool-calling"
+                        "Please switch to a supported model"
+                    ) from e 
                 raise
+        
+        if not terminal_event_received:
+            raise StreamProtocolError(
+                "OpenAI compatible stream ended before a provider completion event"
+            )
 
         completed_tool_calls = accumulator.finalize()
         for tool_call in completed_tool_calls:
@@ -303,22 +337,26 @@ class AnthropicProvider(LLMProvider):
 
         system_parts: list[str] = []
         anthropic_messages: list[dict[str, Any]] = []
-        for message in messages:
+        pending_tool_results: list[dict[str, Any]] = []
+
+        def flush_tool_results() -> None:
+            if pending_tool_results:
+                anthropic_messages.append({"role": "user", "content": list(pending_tool_results)})
+                pending_tool_results.clear()
+
+        for message in _provider_safe_tool_history(messages):
             role = message["role"]
             if role == "system":
                 system_parts.append(message["content"])
                 continue
             if role == "tool":
-                anthropic_messages.append({
-                    "role": "user",
-                    "content": [{
+                pending_tool_results.append({
                         "type": "tool_result",
-                        "tool_use_id": message.get("tool_call_id", "unknown"),
+                        "tool_use_id": message["tool_call_id"],
                         "content": message["content"],
-                    }],
                 })
                 continue
-            
+            flush_tool_results()
             if role == "assistant" and message.get("tool_calls"):
                 blocks: list[dict[str, Any]] = []
                 if message.get("content"):
@@ -342,6 +380,8 @@ class AnthropicProvider(LLMProvider):
                 continue
             
             anthropic_messages.append({"role": role, "content": message["content"]})
+
+        flush_tool_results()
 
         if tool_results:
             anthropic_messages.append({
@@ -419,6 +459,7 @@ class AnthropicProvider(LLMProvider):
         payload["stream"] = True
         accumulator = ToolCallAccumulator()
         finish_reason = "end_turn"
+        terminal_event_received = False
         usage: dict[str, int] = {}
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15)) as client:
@@ -453,12 +494,16 @@ class AnthropicProvider(LLMProvider):
                             if not isinstance(partial_json, str):
                                 raise StreamProtocolError("anthropic tool JSON delta was not text")
                             accumulator.add_anthropic_json_delta(index, partial_json)
+                    elif event_type == "message_stop":
+                        terminal_event_received = True
                     elif event_type == "message_delta":
                         delta = event.get("delta") or {}
                         if delta.get("stop_reason"):
                             finish_reason = str(delta["stop_reason"])
                         usage.update(usage_from_mapping(event.get("usage")))
 
+        if not terminal_event_received:
+            raise StreamProtocolError("Anthropic stream ended before a message_stop event")
         for tool_call in accumulator.finalize():
             yield StreamEvent.completed_tool_call(tool_call)
         yield StreamEvent.message_end(finish_reason, usage)

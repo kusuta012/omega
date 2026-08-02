@@ -30,7 +30,7 @@ async def _render_turn(agent: AgentLoop, user_message: str, resume: bool) -> Non
     except asyncio.CancelledError:
         if answer_started:
             print()
-        print("[cancelled] response stopped; partial agent output was not saved")
+        print("[cancelled] partial assistant output was not saved, completed tool work remains in the session")
         raise
 
 async def _run_turn_with_interrupt(agent: AgentLoop, user_message: str, resume: bool) -> None:

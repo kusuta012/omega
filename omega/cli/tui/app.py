@@ -148,7 +148,7 @@ class OmegaTui:
         except asyncio.CancelledError:
             if wrote_answer:
                 self.transcript.line()
-            self.transcript.line("[cancelled] Response stopped; partial assistant output was not saved.")
+            self.transcript.line("[cancelled] partial assistant output was not saved, completed tool work remains in the session")
             raise
         finally:
             self.transcript.line()

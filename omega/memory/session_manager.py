@@ -105,14 +105,14 @@ class SessionManager:
 
     async def start_new_session(self) -> str:
         if self.active_session_id:
-            await self._close_current_session()
+            await self.close_current_session()
 
         self.active_session_id = await create_session()
         self.system_context = await build_system_context()
         logger.info(f"New session started: {self.active_session_id}")
         return self.active_session_id
 
-    async def _close_current_session(self):
+    async def close_current_session(self):
         if not self.active_session_id:
             return
 
