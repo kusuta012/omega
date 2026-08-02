@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from omega import __version__   
 from omega.cli.doctor import print_doctor_report, run_doctor
+from omega.cli.lifecycle import run_new_session, run_uninstall
 from omega.cli.log_viewer import show_logs
 from omega.cli.logging_config import configure_logging
 from omega.cli.repl import run_repl
@@ -34,6 +35,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("setup", help="Setup Omega and validate local dependencies.")
     subparsers.add_parser("config", help="Update and validate LLM provider settings")
     subparsers.add_parser("doctor", help="run independent environment health checks.")
+    subparsers.add_parser("new", help="start a new persisted session")
+    uninstall_parser = subparsers.add_parser("uninstall", help="remove the installed Omega package")
+    uninstall_parser.add_argument("--yes", action="store_true", help="confirm the package removal")
 
     logs_parser = subparsers.add_parser("logs", help="print the persisted TUI log file")
     logs_parser.add_argument("--follow", action="store_true", help="keep printing appended log lines")
@@ -50,6 +54,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_setup()
     if args.command == "config":
         return run_config()
+    if args.comnabd == "uninstall":
+        return run_uninstall(yes=args.yes)
+    if args.command == "new":
+        return run_new_session()
     if args.command == "doctor":
         return 0 if print_doctor_report(asyncio.run(run_doctor())) else 1
     if args.command == "logs":
