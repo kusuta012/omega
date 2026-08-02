@@ -149,8 +149,8 @@ class SessionManager:
     async def _create_session_summary(self, messages: list[dict]):
         await self._create_session_summary_for(self._require_active_session_id(), messages, trigger="session_close")
 
-    async def add_message(self, role: str, content: str, tool_name: str = None) -> str:
-       return await append_message(self._require_active_session_id(), role, content, tool_name)
+    async def add_message(self, role: str, content: str, tool_name: str | None = None, metadata: dict | None = None) -> str:
+       return await append_message(self._require_active_session_id(), role, content, tool_name, metadata)
 
     async def get_context_messages(self) -> list[dict]:
         session_id = self._require_active_session_id()
@@ -160,6 +160,22 @@ class SessionManager:
         if summaries:
             summary_text = "\n\n".join(summary["content"] for summary in summaries)
             context.append({"role": "system", "content": f"Earlier in this session:\n{summary_text}"})
+        for message in messages:
+            role = message["role"]
+            metadata = message.get("metadata") or {}
+            if role == "assistant":
+                context_message = {"role": "assistant", "content": message["content"]}
+                if metadata.get("tool_calls"):
+                    context_message["tool_calls"] = metadata["tool_calls"]
+                context.append(context_message)
+            elif role == "user":
+                context.append({"role": "user", "content": message["content"]})
+            elif role == "tool" and metadata.get("tool_call_id"):
+                context.append({
+                    "role": "tool",
+                    "tool_call_id": metadata["tool_call_id"],
+                    "content": message["content"],
+                })
         context.extend(
             {"role": message["role"], "content": message["content"]}
             for message in messages
@@ -273,7 +289,7 @@ class SessionManager:
             orphan_id = orphan["id"]
             logger.warning(f"found orphaned session {orphan_id} - attempting crash recovery summary")
             try:
-                messages = await get_session_messages(orphan_id)
+                messages = await get_session_messages(orphan_id, include_compressed=True)
                 if len(messages) >= 2:
                     await self._create_session_summary_for(orphan_id, messages, trigger="crash_recovery")
                     logger.info(f"Crash recovery: created summary for orphaned session {orphan_id}")

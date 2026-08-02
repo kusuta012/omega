@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     tool_name TEXT,
+    metadata JSONB,
     created_at TIMESTAMP DEFAULT now(),
     compressed BOOLEAN DEFAULT FALSE
 );

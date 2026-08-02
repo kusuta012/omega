@@ -77,14 +77,16 @@ async def close_session(session_id: str):
         )
     logger.info(f"closed session {session_id}")
 
-async def append_message(session_id: str, role: str, content: str, tool_name: str = None) -> str:
+async def append_message(session_id: str, role: str, content: str, tool_name: str | None = None, metadata: dict | None = None) -> str:
+    metadata_json = json.dumps(metadata) if metadata is not None else "null"
     async with db_pool.acquire() as conn:
         message_id = await conn.fetchval(
-            "INSERT INTO messages (session_id, role, content, tool_name) VALUES ($1, $2, $3, $4) RETURNING id",
+            "INSERT INTO messages (session_id, role, content, tool_name, metadata) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id",
             session_id,
             role,
             content,
             tool_name,
+            metadata_json,
         )
     return str(message_id)
         
@@ -95,13 +97,13 @@ async def get_session_messages(session_id: str, include_compressed: bool = False
     async with db_pool.acquire() as conn:
         if include_compressed:
             rows = await conn.fetch(
-                "SELECT id, role, content, tool_name, created_at FROM messages "
+                "SELECT id, role, content, tool_name, metadata, created_at FROM messages "
                 "WHERE session_id = $1 ORDER BY created_at ASC",
                 session_id
             )
         else:
             rows = await conn.fetch(
-                "SELECT id, role, content, tool_name, created_at FROM messages "
+                "SELECT id, role, content, tool_name, metadata, created_at FROM messages "
                 "WHERE session_id = $1 AND compressed = FALSE ORDER BY created_at ASC",
                 session_id
             )

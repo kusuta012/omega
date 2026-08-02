@@ -11,6 +11,7 @@ from omega.memory.consolidation import get_consolidation_job
 from omega.environment.conf_loader import omega_settings
 from omega.memory.turn_context import TurnContextManager
 from omega.memory.provenance import DURABLE_MEMORY_TOOLS, DirectUserProvenance
+from omega.memory.session_locks import session_turn_locks
 import asyncio
 
 logger = logging.getLogger("AgentLoop")
@@ -23,7 +24,11 @@ class AgentLoop:
         self.tools_schema_text = json.dumps(TOOLS_OPENAI_FORMAT)
 
     async def process(self, user_message: str, *, session_id: str | None = None) -> dict:
-        await self.session_manager.ensure_session(session_id=session_id)
+        active_session_id = await self.session_manager.ensure_session(session_id=session_id)
+        async with session_turn_locks.acquire(active_session_id):
+            return await self._process_in_session(user_message)
+    
+    async def _process_in_session(self, user_message: str) -> dict:
         user_message_id = await self.session_manager.add_message("user", user_message)
         memory_provenance = DirectUserProvenance(
             session_id=str(self.session_manager.active_session_id),
@@ -95,8 +100,11 @@ class AgentLoop:
             if response.tool_calls and not tool_decision_text.strip():
                 logger.warning("Structured Reasoning Enforcer: LLM emitted tool call without CoT monologue. Intercepting.")
                 err_msg = "[SYSTEM REJECTION: You attempted to call a tool without explaining your reasoning first. State your thought process and plan before calling any tools.]"
+                await self.session_manager.add_message(
+                    "assistant", tool_decision_text, metadata={"tool_calls": assistant_msg["tool_calls"]}
+                )
                 for tc in response.tool_calls:
-                    await self.session_manager.add_message("tool", err_msg, tool_name=tc.name)
+                    await self.session_manager.add_message("tool", err_msg, tool_name=tc.name, metadata={"tool_call_id": tc.id})
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -104,7 +112,7 @@ class AgentLoop:
                     })
                 continue
 
-            await self.session_manager.add_message("assistant", tool_decision_text)
+            await self.session_manager.add_message("assistant", tool_decision_text, metadata={"tool_calls": assistant_msg["tool_calls"]})
 
             safe_tool_calls = []
             for tc in response.tool_calls:
@@ -155,7 +163,7 @@ class AgentLoop:
                 raw_tool_content = result.get("answer", result.get("error", "No result"))
                 tool_content = turn_context.truncate_and_cache(tc.name, raw_tool_content)
 
-                await self.session_manager.add_message("tool", tool_content, tool_name=tc.name)
+                await self.session_manager.add_message("tool", tool_content, tool_name=tc.name, metadata={"tool_call_id": tc.id})
 
                 ephemeral_content = tool_content
                 if i == len(executed_results) - 1:
@@ -167,7 +175,11 @@ class AgentLoop:
                 })
 
     async def process_stream(self, user_message: str, *, resume: bool = False) -> AsyncIterator[AgentEvent]:
-        await self.session_manager.ensure_session(resume=resume)
+        active_session_id = await self.session_manager.ensure_session(resume=resume)
+        async with session_turn_locks.acquire(active_session_id):
+            async for event in self._process_stream_in_session(user_message):
+                yield event
+    async def _process_stream_in_session(self, user_message: str) -> AsyncIterator[AgentEvent]:
         user_message_id = await self.session_manager.add_message("user", user_message)
         memory_provenance = DirectUserProvenance(
             session_id=str(self.session_manager.active_session_id),
@@ -282,8 +294,11 @@ class AgentLoop:
                     "[SYSTEM: You attempted to call a tool without explaining your reasoning first"
                     "State your thought process and plan before calling any tools"
                 )
+                await self.session_manager.add_message(
+                    "assistant", response_text, metadata={"tool_calls": assistant_msg["tool_calls"]}
+                )
                 for tool_call in streamed_tool_calls:
-                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name)
+                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name, metadata={"tool_call_id": tool_call.id})
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -291,7 +306,7 @@ class AgentLoop:
                     })
                 continue
 
-            await self.session_manager.add_message("assistant", response_text)
+            await self.session_manager.add_message("assistant", response_text, metadata={"tool_calls": assistant_msg["tool_calls"]})
             safe_tool_calls = []
             for tool_call in streamed_tool_calls:
                 if tool_results_seen_this_turn and tool_call.name in DURABLE_MEMORY_TOOLS:
@@ -299,7 +314,7 @@ class AgentLoop:
                         f"{tool_call.name} blocked: tool results exist since the current user message"
                     )
                     logger.warning(error_message)
-                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name)
+                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name, metadata={"tool_call_id": tool_call.id})
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -359,7 +374,7 @@ class AgentLoop:
 
                 raw_tool_content = result.get("answer", result.get("error", "No result"))
                 tool_content = turn_context.truncate_and_cache(tool_call.name, raw_tool_content)
-                await self.session_manager.add_message("tool", tool_content, tool_name=tool_call.name)
+                await self.session_manager.add_message("tool", tool_content, tool_name=tool_call.name, metadata={"tool_call_id"})
                 
                 ephemeral_content = tool_content
                 if index == len(executed_results) - 1:

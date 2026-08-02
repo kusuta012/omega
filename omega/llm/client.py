@@ -54,34 +54,63 @@ def is_retryable_http_error(exception: BaseException) -> bool:
 
 def _provider_safe_tool_history(messages: list[dict]) -> list[dict]:
     safe_messages: list[dict] = []
-    pending_tool_call_ids: set[str] = set()
-    for message in messages:
-        role = message.get("role")
-        if role == "assistant" and message.get("tool_calls"):
-            tool_calls = message["tool_calls"]
-            if not isinstance(tool_calls, list):
-                logger.warning("dropping malformed assistant tool declaration")
-                continue
-            call_ids = {
-                str(call.get("id"))
-                for call in tool_calls
-                if isinstance(call, dict) and call.get("id")
-            }
-            if not call_ids:
-                logger.warning("dropping assistant tool declaration without call ids")
-                continue
-            pending_tool_call_ids.update(call_ids)
-            safe_messages.append(message)
-            continue
-        if role == "tool":
-            tool_call_id = str(message.get("tool_call_id", ""))
-            if tool_call_id not in pending_tool_call_ids:
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            if message.get("role") != "tool":
+                safe_messages.append(message)
+            else:
                 logger.warning("dropping orphaned tool result from provider history")
-                continue
-            safe_messages.append(message)
+            index += 1
             continue
+
+        tool_calls = message["tool_calls"]
+        if not isinstance(tool_calls, list) or not tool_calls:
+            logger.warning("dropping malformed assistant tool declaration")
+            index += 1
+            continue
+
+        call_ids: set[str] = set()
+        valid_declaration = True
+        for call in tool_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            call_id = str(call.get("id", "")) if isinstance(call, dict) else ""
+            if not call_id or not call_id in call_ids or not isinstance(function, dict):
+                valid_declaration = False
+                break
+            if not isinstance(function.get("name"), str) or not function["name"]:
+                valid_declaration = False
+                break
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                valid_declaration = False
+                break
+            try:
+                json.loads(arguments)
+            except json.JSONDecodeError:
+                valid_declaration = False
+                break
+            call_ids.add(call_id)
+
+        result_messages = messages[index + 1:index + 1 + len(call_ids)]
+        result_ids = [str(result.get("tool_call_id", "")) for result in result_messages]
+        if (
+            not valid_declaration
+            or len(result_messages) != len(call_ids)
+            or any(result.get("role") != "tool" for result in result_messages)
+            or set(result_ids) != call_ids
+            or len(set(result_ids)) != len(result_ids)
+        ):
+            logger.warning("dropping incomplete or out-of-order tool interaction from provider history")
+            index += 1
+            continue
+
         safe_messages.append(message)
+        safe_messages.extend(result_messages)
+        index += 1 + len(result_messages)
     return safe_messages
+
 
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(self):
