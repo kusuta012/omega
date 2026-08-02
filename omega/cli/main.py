@@ -54,7 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_setup()
     if args.command == "config":
         return run_config()
-    if args.comnabd == "uninstall":
+    if args.command == "uninstall":
         return run_uninstall(yes=args.yes)
     if args.command == "new":
         return run_new_session()
