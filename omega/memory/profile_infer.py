@@ -1,7 +1,9 @@
 import logging
 import hashlib
+import json
 import tempfile
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from omega.environment.conf_loader import omega_settings
 
@@ -71,8 +73,30 @@ def safe_auto_write(file_stem: str, content: str, force: bool = False) -> tuple[
     logger.info(f"wrote {file_stem}.md ({len(content)} chars)")
     return True, f"wrote {file_stem}.md ({len(content)} chars)"
 
-def append_section_to_profile(file_stem: str, text: str, section_title: str = "", force:bool = False) -> tuple[bool, str]:
+def _record_profile_provenance(
+    file_stem: str,
+    text: str,
+    section_title: str,
+    provenance: dict,
+):
+    path = Path(omega_settings.memory_dir) / f".{file_stem}.provenance.jsonl"
+    record = {
+        **provenance,
+        "target_file": f"{file_stem}.md",
+        "section_title": section_title,
+        "content": text,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+def append_section_to_profile(file_stem: str, text: str, section_title: str = "", force:bool = False, provenance: dict | None = None,) -> tuple[bool, str]:
     from omega.memory.core import read_memory_md, read_user_md
+
+    if provenance is None and not force:
+        return False, "direct user provenance is required for profile writes"
 
     if not force:
         edited, reason = was_man_edited(file_stem)
@@ -93,4 +117,7 @@ def append_section_to_profile(file_stem: str, text: str, section_title: str = ""
         new_section += f"\n\n## {section_title}\n"
     new_section += f"{text}\n"
     new_content = current.rstrip() + "\n" + new_section
-    return safe_auto_write(file_stem, new_content, force=force)
+    was_written, reason = safe_auto_write(file_stem, new_content, force=force)
+    if was_written and provenance is not None:
+        _record_profile_provenance(file_stem, text, section_title, provenance)
+    return was_written, reason

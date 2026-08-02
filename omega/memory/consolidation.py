@@ -44,7 +44,7 @@ Return ONLY a JSON object with this exact structure (no explanations, no markdow
     "core_entry_ids": ["uuid1", "uuid2", "uuid3"]
 }"""
 
-PROFILE_PROMPT = f"""You are omega's profile curator. Review the recent session below and identify any new information about the USER that should be added to USER.md
+PROFILE_PROMPT = """You are omega's profile curator. Review the recent session below and identify any new information about the USER that should be added to USER.md
 Your notes about who the user is and how to interact with them.
 
 USER.md should contain:

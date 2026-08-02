@@ -133,8 +133,8 @@ class SessionManager:
     async def _create_session_summary(self, messages: list[dict]):
         await self._create_session_summary_for(self._require_active_session_id(), messages, trigger="session_close")
 
-    async def add_message(self, role: str, content: str, tool_name: str = None):
-        await append_message(self._require_active_session_id(), role, content, tool_name)
+    async def add_message(self, role: str, content: str, tool_name: str = None) -> str:
+       return await append_message(self._require_active_session_id(), role, content, tool_name)
 
     async def get_context_messages(self) -> list[dict]:
         session_id = self._require_active_session_id()

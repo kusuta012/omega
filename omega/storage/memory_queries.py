@@ -73,12 +73,17 @@ async def close_session(session_id: str):
         )
     logger.info(f"closed session {session_id}")
 
-async def append_message(session_id: str, role: str, content: str, tool_name: str = None):
+async def append_message(session_id: str, role: str, content: str, tool_name: str = None) -> str:
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_name) VALUES ($1, $2, $3, $4)",
-            session_id, role, content, tool_name
+        message_id = await conn.fetchval(
+            "INSERT INTO messages (session_id, role, content, tool_name) VALUES ($1 $2, $3, $4) RETURNING id",
+            session_id,
+            role,
+            content,
+            tool_name,
         )
+    return str(message_id)
+        
 
 # Hello unc reviewer, don't be too lazy to review projects
 

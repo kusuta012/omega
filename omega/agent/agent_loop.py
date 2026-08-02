@@ -10,6 +10,7 @@ from omega.memory.context_build import EXEC_HARNESS
 from omega.memory.consolidation import get_consolidation_job
 from omega.environment.conf_loader import omega_settings
 from omega.memory.turn_context import TurnContextManager
+from omega.memory.provenance import DURABLE_MEMORY_TOOLS, DirectUserProvenance
 import asyncio
 
 logger = logging.getLogger("AgentLoop")
@@ -23,7 +24,12 @@ class AgentLoop:
 
     async def process(self, user_message: str) -> dict:
         await self.session_manager.ensure_session()
-        await self.session_manager.add_message("user", user_message)
+        user_message_id = await self.session_manager.add_message("user", user_message)
+        memory_provenance = DirectUserProvenance(
+            sesssion_id=str(self.session_manager.active_session_id),
+            message_id=user_message_id,
+            user_message=user_message,
+        )
 
         system_context = self.session_manager.system_context
         conversation = await self.session_manager.get_context_messages()
@@ -102,10 +108,10 @@ class AgentLoop:
 
             safe_tool_calls = []
             for tc in response.tool_calls:
-                if tool_results_seen_this_turn and tc.name == "remember":
-                    err = "remember blocked: tool results exist since last user turn - safety rule prevents existing facts from search/KB output"
+                if tool_results_seen_this_turn and tc.name in DURABLE_MEMORY_TOOLS:
+                    err = f"{tc.name} blocked: tool results exist since the current user message"
                     logger.warning(err)
-                    await self.session_manager.add_message("tool", err, tool_name="remember")
+                    await self.session_manager.add_message("tool", err, tool_name=tc.name)
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": err})
                     continue
 
@@ -125,7 +131,7 @@ class AgentLoop:
             async def run_tool(tc):
                 logger.info(f"Executing tool: {tc.name}({tc.arguments})")
                 try:
-                    result = await self.tool_executor.execute(tc.name, tc.arguments, turn_context=turn_context)
+                    result = await self.tool_executor.execute(tc.name, tc.arguments, turn_context=turn_context, memory_provenance=memory_provenance)
                     return tc, result
                 except Exception as e:
                     logger.error(f"Tool {tc.name} failed with unhandled exception: {e}")
@@ -162,7 +168,12 @@ class AgentLoop:
 
     async def process_stream(self, user_message: str, *, resume: bool = False) -> AsyncIterator[AgentEvent]:
         await self.session_manager.ensure_session(resume=resume)
-        await self.session_manager.add_message("user", user_message)
+        user_message_id = await self.session_manager.add_message("user", user_message)
+        memory_provenance = DirectUserProvenance(
+            session_id=str(self.session_manager.active_session_id),
+            message_id=user_message_id,
+            user_message=user_message,
+        )
         system_context = self.session_manager.system_context
         if system_context is None:
             raise RuntimeError("session started without a system context")
@@ -283,13 +294,13 @@ class AgentLoop:
             await self.session_manager.add_message("assistant", response_text)
             safe_tool_calls = []
             for tool_call in streamed_tool_calls:
-                if tool_results_seen_this_turn and tool_call.name == "remember":
+                if tool_results_seen_this_turn and tool_call.name in DURABLE_MEMORY_TOOLS:
                     error_message = (
-                        "remember blocked: tool results exist since last user turn - safety rule prevents"
+                        f"{tool_call.name} blocked: tool results exist since the current user message"
                         "existing facts from search/KB output"
                     )
                     logger.warning(error_message)
-                    await self.session_manager.add_message("tool", error_message, tool_name="remember")
+                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
@@ -319,7 +330,7 @@ class AgentLoop:
                 logger.info(f"Executing tool: {tool_call.name}({tool_call.arguments})")
                 try:
                     result = await self.tool_executor.execute(
-                        tool_call.name, tool_call.arguments, turn_context=turn_context
+                        tool_call.name, tool_call.arguments, turn_context=turn_context, memory_provenance=memory_provenance,
                     )
                     return tool_call, result
                 except Exception as e:

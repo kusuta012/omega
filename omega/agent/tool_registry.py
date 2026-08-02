@@ -1,6 +1,7 @@
 import logging
 import json
-from omega.memory.profile_infer import append_section_to_profile, safe_auto_write
+from omega.memory.profile_infer import append_section_to_profile
+from omega.memory.provenance import DirectUserProvenance
 from omega.rag.synthesis import Synthesis
 from omega.storage.management_queries import (
     list_items_paginated, get_item_detail
@@ -124,9 +125,10 @@ TOOLS_OPENAI_FORMAT = [
             "description": "SAVE something important the user just told you about themselves - a stated preference, a personal fact, a notable life event, a goal. ONLY use this for durable, personal information the user directly shared in this conversation. Do NOT use for routine chat, questions, or content from saved documents. Before saving, think: will this still matter in a week?",
             "parameters": {
                 "fact": {"type": "string", "description": "The specific fact to remember, stated clearly as a standalone sentence (e.g 'The user prefers dark mode in all applications')"},
-                "importance": {"type": "number", "description": "How important this fact is (0.0-1.0), Default 0.7 for preferences, 0.9 for major life events, 0.5 for minor notes."}
+                "importance": {"type": "number", "description": "How important this fact is (0.0-1.0), Default 0.7 for preferences, 0.9 for major life events, 0.5 for minor notes."},
+                "source_text": {"type": "string", "description": "An exact quote from the current user message that supports this memory"}
             },
-            "required": ["fact"]
+            "required": ["fact", "source_text"]
         }
     },
     {
@@ -146,12 +148,16 @@ TOOLS_OPENAI_FORMAT = [
                         "type": "string",
                         "description": "The content to add. Write in natural language as a note to yourself. Examples: 'The user prefers very concise answers 1-2 sentences max. They get annoyed by verbosity' or 'User is a software engineer who works primarily in Rust and C' or 'User mentioned they are moving to Africa next month'"
                     },
+                    "source_text": {
+                        "type": "string",
+                        "description": "An exact quote from the current user message that supports this update"
+                    },
                     "section_title": {
                         "type": "string",
                         "description": "optional markdown heading for the new section (eq. 'Communication Style', 'Work context', 'Their Habits')"
                     }
                 },
-                "required": ["file", "content"]
+                "required": ["file", "content", "source_text"]
             }
         }
     },
@@ -234,15 +240,18 @@ class ToolExecutor:
         self.llm_client = get_llm_provider()
         self.embedding_service = get_embedding_service()
 
-    async def execute(self, tool_name: str, arguments: dict, turn_context=None) -> dict:
+    async def execute(self, tool_name: str, arguments: dict, turn_context=None, memory_provenance: DirectUserProvenance | None = None) -> dict:
+        if tool_name == "remember":
+            return await self._remember(arguments, memory_provenance)
+        if tool_name == "update_profile":
+            await self._update_profile(arguments, memory_provenance)
+        
         executors = {
             "search_knowledge_base": self._search,
             "search_memory": self._search_memory,
             "summarize_item": self._summarize,
             "list_recent_items": self._list_items,
             "get_item_status": self._get_status,
-            "remember": self._remember,
-            "update_profile": self._update_profile,
             "write_scratchpad": self._write_scratchpad,
             "read_full_document": self._read_full_document,
             "read_overflow": lambda args: self._read_overflow(args, turn_context)
@@ -415,7 +424,7 @@ class ToolExecutor:
                         latest_job = jobs[0]
                         status_line += f"\nLatest job: {latest_job['status']} attempt {latest_job['attempts']}"
                         if latest_job["last_error"]:
-                            status_line += f"\nLast error: {latest_job["last_error"]}"
+                            status_line += f"\nLast error: {latest_job['last_error']}"
                     status_line += f"\nChunks: {len(detail['chunks'])}"
                     status_line += f"\nNote: no item name '{title_query}' exactly, but found this similar item"
                     return {
@@ -490,7 +499,28 @@ class ToolExecutor:
             "result_summary": f"unified search: {kb_count} KB sources + {mem_count} memory entries"
         }
 
-    async def _remember(self, args: dict) -> dict:
+    def _validate_memory_provenance(
+        self,
+        args: dict,
+        provenance: DirectUserProvenance | None,
+    ) -> str | None:
+        if provenance is None:
+            return "durable memory writes require a direct user message"
+        source_text = str(args.get("source_text", ""))
+        if not provenance.authorizes(source_text):
+            return "source_text must quote text from the current user message"
+        return None
+
+    async def _remember(self, args: dict, provenance: DirectUserProvenance | None,) -> dict:
+        provenance_error = self._validate_memory_provenance(args, provenance)
+        if provenance_error:
+            return {
+                "success": False,
+                "error": provenance_error,
+                "result_summary": f"remember blocked: {provenance_error}",
+            }
+        assert provenance is not None
+
         fact = args.get("fact", "").strip()
         if not fact:
             return {"success": False, "error": "No fact provided", "result_summary": "Empty fact"}
@@ -511,10 +541,10 @@ class ToolExecutor:
             entry_id = await store_extracted_fact(
                 content=fact,
                 embedding=embedding,
-                source_session_id=None,
+                source_session_id=provenance.session_id,
                 importance=importance,
                 supersedes_id=supersedes_id,
-                metadata={"source": "remember_tool"},
+                metadata={"source": "remember_tool", **provenance.metadata()},
             )
         except Exception as e:
             logger.error(f"Failed to store extracted fact: {e}")
@@ -571,7 +601,16 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
 
         return None
 
-    async def _update_profile(self, args: dict) -> dict:
+    async def _update_profile(self, args: dict, provenance: DirectUserProvenance | None,) -> dict:
+        provenance_error = self._validate_memory_provenance(args, provenance)
+        if provenance_error:
+            return {
+                "success": False,
+                "error": provenance_error,
+                "result_summary": f"update_profile blocked: {provenance_error}",
+            }
+        assert provenance is not None
+
         file_name = args.get("file", "").strip()
         content = args.get("content", "").strip()
         section_title = args.get("section_title", "").strip()
@@ -603,7 +642,7 @@ Return ONLY a JSON object: {{"supersedes_id": "uuid-here"}} or {{"supersedes_id"
             section_title = f"update {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
         try:
-            was_written, reason = append_section_to_profile(file_stem, content, section_title)
+            was_written, reason = append_section_to_profile(file_stem, content, section_title, provenance=provenance.metadata())
             if was_written:
                 return {
                     "success": True,
