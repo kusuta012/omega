@@ -468,12 +468,12 @@ def get_llm_provider() -> LLMProvider:
     global _llm_provider
     if _llm_provider is None:
         provider_type = omega_settings.llm_provider.lower()
-        if provider_type == "openai_compatible":
+        if provider_type == {"openai_compatible", "openrouter"}:
             _llm_provider = OpenAICompatibleProvider()
         elif provider_type == "anthropic":
             _llm_provider = AnthropicProvider()
         else:
-            raise ValueError(f"Unknown LLM_PROVIDER: {provider_type}, use 'openai_compatible' or 'antrhopic'..")
+            raise ValueError(f"Unknown LLM_PROVIDER: {provider_type}, use 'openai_compatible' or 'anthropic'..")
     return _llm_provider
 
 _llm_provider: LLMProvider | None = None
