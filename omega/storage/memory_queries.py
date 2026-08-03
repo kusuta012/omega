@@ -58,12 +58,19 @@ async def get_session(session_id: str) -> dict | None:
 
 async def reopen_session(session_id: str) -> bool:
     async with db_pool.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE sessions
-            SET status = 'active', ended_at = NULL
-            WHERE id = $1 AND status = 'closed'
-        """, session_id)
-    reopened = result == "UPDATE 1"
+        async with conn.transaction():
+            result = await conn.execute("""
+                UPDATE sessions
+                SET status = 'active', ended_at = NULL
+                WHERE id = $1 AND status = 'closed'
+            """, session_id)
+            reopened = result == "UPDATE 1"
+            if reopened:
+                await conn.execute("""
+                    DELETE FROM session_summaries
+                    WHERE session_id = $1
+                      AND summary_kind IN ('session_close', 'crash_recovery')
+                """, session_id)
     if reopened:
         logger.info(f"Reopened session {session_id}")
     return reopened
@@ -160,18 +167,6 @@ async def store_memory_entry(
     logger.info(f"Stored memory entry {entry_id} (type={memory_type})")
     return entry_id
 
-async def get_recent_session_summaries(limit: int = 2) -> list[dict]:
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT me.content, me.created_at, s.started_at AS session_started
-            FROM memory_entries me
-            LEFT JOIN sessions s ON me.source_session_id = s.id
-            WHERE me.memory_type = 'session_summary'
-            ORDER BY me.created_at DESC
-            LIMIT $1
-        """, limit)
-    return [dict(r) for r in rows]
-
 async def create_session_summary(
     session_id: str,
     summary_kind: str,
@@ -202,7 +197,7 @@ async def create_session_summary(
             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
             ON CONFLICT DO NOTHING
             RETURNING id, session_id, summary_kind, content, first_message_id, last_message_id,
-                      message_count, created_at, metdata
+                      message_count, created_at, metadata
         """, session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata_json)
         if row:
             return _summary_from_row(row)
@@ -219,8 +214,8 @@ async def create_session_summary(
             """, session_id)
         else:
             row = await conn.fetchrow("""
-                SELECT id, session_id, summary_kind content, first_message_id, last_message_id,
-                       message_count, created_at, metadata)
+                SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
+                       message_count, created_at, metadata
                 FROM session_summaries
                 WHERE session_id = $1
                   AND summary_kind = $2
@@ -262,7 +257,7 @@ async def get_recent_closed_session_summaries(limit: int = 2) -> list[dict]:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT ss.id, ss.session_id, ss.summary_kind, ss.content, ss.first_message_id,
-                   ss.last_message_id, ss.message_count, ss.created_at, ss.metdata
+                   ss.last_message_id, ss.message_count, ss.created_at, ss.metadata
             FROM session_summaries ss
             JOIN sessions s ON s.id = ss.session_id
             WHERE s.status = 'closed'
@@ -271,18 +266,6 @@ async def get_recent_closed_session_summaries(limit: int = 2) -> list[dict]:
             LIMIT $1
         """, limit)
     return [_summary_from_row(row) for row in rows]
-
-async def get_session_compression_summaries(session_id: str) -> list[dict]:
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT content, created_at, metadata
-            FROM memory_entries
-            WHERE memory_type = 'session_summary'
-              AND source_session_id = $1
-              AND metadata->>'trigger' IN ('standard_compression', 'emergency_compression')
-            ORDER BY created_at ASC
-        """, session_id)
-    return [dict(row) for row in rows]
 
 async def record_memory_access(entry_id: str):
     async with db_pool.acquire() as conn:

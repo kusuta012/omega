@@ -76,13 +76,13 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 );
 
 CREATE TABLE IF NOT EXISTS session_summaries (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     summary_kind TEXT NOT NULL,
     content TEXT NOT NULL,
     first_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
     last_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
-    messages_count INT NOT NULL,
+    message_count INT NOT NULL,
     created_at TIMESTAMP DEFAULT now(),
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT chk_session_summary_kind CHECK (
@@ -102,8 +102,9 @@ BEGIN
         );
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_session_summary_message_count') THEN
+        ALTER TABLE session_summaries ADD CONSTRAINT chk_session_summary_message_count CHECK (message_count >= 0);
     END IF;
-    IF NOT EXISTS (SELECT 1 FROm pg_constraint WHERE conname = 'chk_session_summary_source_range') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_session_summary_source_range') THEN
         ALTER TABLE session_summaries ADD CONSTRAINT chk_session_summary_source_range CHECK (
             first_message_id IS NOT NULL AND last_message_id IS NOT NULL
         );

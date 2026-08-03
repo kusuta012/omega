@@ -11,7 +11,6 @@ from omega.storage.memory_queries import (
     get_final_session_summary,
     get_session_summary_spans,
     mark_messages_compressed,
-    get_session_compression_summaries,
     find_orphaned_sessions
 )
 from omega.memory.context_build import estimate_tokens, build_system_context
