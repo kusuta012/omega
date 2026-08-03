@@ -139,7 +139,7 @@ class AgentLoop:
             execution_tasks = [run_tool(tc) for tc in safe_tool_calls]
             executed_results = await asyncio.gather(*execution_tasks)
             
-            for i, (tc, result) in enumerate(executed_results):
+            for tc, result in executed_results:
                 tool_calls_log.append({
                     "tool": tc.name, "input": tc.arguments,
                     "result_summary": result.get("result_summary", "no summary")
@@ -157,13 +157,8 @@ class AgentLoop:
 
                 await self.session_manager.add_message("tool", tool_content, tool_name=tc.name, metadata={"tool_call_id": tc.id})
 
-                ephemeral_content = tool_content
-                if i == len(executed_results) - 1:
-                    reflection = f"\n\n[SYSTEM INSTRUCTION: You have completed {tool_round} of {omega_settings.max_tool_rounds_per_turn} tool rounds. Evaluate the results above. If you have enough information to fully answer the user, do so. If not, state what is missing and use another tool.]"
-                    ephemeral_content += reflection
-
                 messages.append({
-                    "role": "tool", "tool_call_id": tc.id, "content": ephemeral_content 
+                    "role": "tool", "tool_call_id": tc.id, "content": tool_content
                 })
 
     async def process_stream(self, user_message: str, *, resume: bool = False) -> AsyncIterator[AgentEvent]:
