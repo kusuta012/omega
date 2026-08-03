@@ -49,7 +49,7 @@ class Synthesis:
         return await search_hybrid_chunks(query, query_vector, top_k)
 
     async def search_personal_memory(self, query: str, top_k: int = 5) -> list[dict]:
-        rewritten = await self.rewrite_query(query)
+        query_vector = self.embedding_service.generate_single_embedding(query)
         return await search_memory_entries(query, query_vector, top_k)
 
     async def answer_question(self, query: str, top_k: int = 5) -> dict:
@@ -116,7 +116,7 @@ If they do not contain the answer, say so. Do not present these entries as saved
         memory_context = "\n\n".join(context_passages)
         user_prompt = f"QUESTION:\n{query}\n\nPERSONAL MEMORY:\n{memory_context}\n\nANSWER:"
         answer = await self.llm_client.generate_answer(prompt, user_prompt)
-        
+
         for entry_id in memory_entry_ids:
             try:
                 await record_memory_access(entry_id)
