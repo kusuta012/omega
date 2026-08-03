@@ -1,3 +1,5 @@
+import asyncio
+import asyncpg
 import json
 import logging
 from omega.storage.postgres_session import db_pool
@@ -118,13 +120,13 @@ async def get_session_messages(session_id: str, include_compressed: bool = False
     async with db_pool.acquire() as conn:
         if include_compressed:
             rows = await conn.fetch(
-                "SELECT id, role, content, tool_name, metadata, created_at FROM messages "
+                "SELECT id, role, content, tool_name, metadata, compressed, created_at FROM messages "
                 "WHERE session_id = $1 ORDER BY created_at ASC",
                 session_id
             )
         else:
             rows = await conn.fetch(
-                "SELECT id, role, content, tool_name, metadata, created_at FROM messages "
+                "SELECT id, role, content, tool_name, metadata, compressed, created_at FROM messages "
                 "WHERE session_id = $1 AND compressed = FALSE ORDER BY created_at ASC",
                 session_id
             )
@@ -167,66 +169,121 @@ async def store_memory_entry(
     logger.info(f"Stored memory entry {entry_id} (type={memory_type})")
     return entry_id
 
-async def create_session_summary(
+async def _create_session_summary(
+    conn,
     session_id: str,
     summary_kind: str,
     content: str,
-    first_message_id: str | None,
-    last_message_id: str | None,
+    first_message_id: str,
+    last_message_id: str,
     message_count: int,
-    metadata: dict | None = None,
+    metadata: dict | None,
 ) -> dict:
     allowed_kinds = {
         "standard_compression",
         "emergency_compression",
         "session_close",
-        "crash_recovery"
+        "crash_recovery",
     }
     if summary_kind not in allowed_kinds:
         raise ValueError(f"Unknown session summary kind: {summary_kind}")
     if message_count < 0:
         raise ValueError("Session summary message_count cannot be negative")
-    if first_message_id is None or last_message_id is None:
+    if not first_message_id or not last_message_id:
         raise ValueError("Session summaries require complete source-message boundaries")
 
-    metadata_json = json.dumps(metadata or {})
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO session_summaries
-                (session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-            ON CONFLICT DO NOTHING
-            RETURNING id, session_id, summary_kind, content, first_message_id, last_message_id,
-                      message_count, created_at, metadata
-        """, session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata_json)
-        if row:
-            return _summary_from_row(row)
+    row = await conn.fetchrow("""
+        INSERT INTO session_summaries
+            (session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        ON CONFLICT DO NOTHING
+        RETURNING id, session_id, summary_kind, content, first_message_id, last_message_id,
+                  message_count, created_at, metadata
+    """, session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata_json)
+    if row:
+        return _summary_from_row(row)
 
-        if summary_kind in {"session_close", "crash_recovery"}:
-            row = await conn.fetchrow("""
-                SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
+    if summary_kind in {"session_close", "crash_recovery"}:
+        row = await conn.fetchrow("""
+            SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
+                   message_count, created_at, metadata
+            FROM session_summaries
+            WHERE session_id = $1
+              AND summary_kind IN ('session_close', 'crash_recovery')
+            ORDER BY created_at ASC
+            LIMIT 1
+        """, session_id)
+    else:
+        row = await conn.fetchrow("""
+            SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
                     message_count, created_at, metadata
-                FROM session_summaries
-                WHERE session_id = $1
-                  AND summary_kind IN ('session_close', 'crash_recovery')
-                ORDER BY created_at ASC
-                LIMIT 1
-            """, session_id)
-        else:
-            row = await conn.fetchrow("""
-                SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
-                       message_count, created_at, metadata
-                FROM session_summaries
-                WHERE session_id = $1
-                  AND summary_kind = $2
-                  AND first_message_id = $3
-                  AND last_message_id = $4
-                LIMIT 1
-            """, session_id, summary_kind, first_message_id, last_message_id)
+            FROM session_summaries
+            WHERE session_id = $1
+              AND summary_kind = $2
+              AND first_message_id = $3
+              AND last_message_id = $4
+            LIMIT 1
+        """, session_id, summary_kind, first_message_id, last_message_id)
     if row:
         return _summary_from_row(row)
     raise RuntimeError("Session summary insert did not create or locate a summary")
     
+async def create_session_summary(
+    session_id: str,
+    summary_kind: str,
+    content: str,
+    first_message_id: str,
+    last_message_id: str,
+    message_count: int,
+    metadata: dict | None = None,
+) -> dict:
+    async with db_pool.acquire() as conn:
+        return await _create_session_summary(
+            conn, session_id, summary_kind, content, first_message_id,
+            last_message_id, message_count, metdata,
+        )
+
+async def create_session_summary_and_mark(
+    session_id: str,
+    summary_kind: str,
+    content: str,
+    first_message_id: str,
+    last_message_id: str,
+    message_ids: list[str],
+    metadata: dict | None = None,
+) -> dict:
+    if not message_ids:
+        raise ValueError("Compression summaries require source messages")
+    if len(set(message_ids)) != len(message_ids):
+        raise ValueError("Compression summary source messages must be unique")
+
+    for attempt in range(3):
+        try:
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    summary = await _create_session_summary(
+                        conn, session_id, summary_kind, content, first_message_id,
+                        last_message_id, len(message_ids), metadata,
+                    )
+                    result = await conn.execute("""
+                        UPDATE messages
+                        SET compressed = TRUE
+                        WHERE session_id = $1
+                          AND compressed = FALSE
+                          AND id = ANY($2::uuid[])
+                    """, session_id, message_ids)
+                    updated_count = int(result.rsplit(" ", 1)[-1])
+                    if updated_count != len(message_ids):
+                        raise RuntimeError(
+                            f"Compression source mismatch: expected {len(message_ids)} messages, updated {updated_count}"
+                        )
+            return summary
+        except asyncpg.PostgresError as exc:
+            if getattr(exc, "sqlstate", None) not in {"40001", "40P01"} or attempt == 2:
+                raise
+            await asyncio.sleep(0.05 * (2 ** attempt))
+    raise RuntimeError("Compression transaction retry loop exhausted")
+
 
 async def get_final_session_summary(session_id: str) -> dict | None:
     async with db_pool.acquire() as conn:

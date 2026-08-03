@@ -1,3 +1,4 @@
+import json
 import logging
 from omega.storage.memory_queries import (
     create_session,
@@ -8,9 +9,9 @@ from omega.storage.memory_queries import (
     get_session_messages,
     append_message,
     create_session_summary,
+    create_compression_summary_and_mark,
     get_final_session_summary,
     get_session_summary_spans,
-    mark_messages_compressed,
     find_orphaned_sessions
 )
 from omega.memory.context_build import estimate_tokens, build_system_context
@@ -121,6 +122,7 @@ class SessionManager:
                 await self._create_session_summary(messages)
             except Exception as e:
                 logger.error(f"Failed to create session summary during session close: {e}")
+                return
 
         await close_session(self.active_session_id)
         logger.info(f"Session {self.active_session_id} closed")
@@ -156,30 +158,92 @@ class SessionManager:
     async def add_message(self, role: str, content: str, tool_name: str | None = None, metadata: dict | None = None) -> str:
        return await append_message(self._require_active_session_id(), role, content, tool_name, metadata)
 
+    @staticmethod
+    def _metadata_dict(message: dict) -> dict:
+        metadata = message.get("metadata")
+        return metadata if isinstance(metadata, dict) else {}
+
+    @staticmethod
+    def _is_valid_tool_arguments(arguments) -> bool:
+        if not isinstance(arguments, str):
+            return False
+        try:
+            return isinstance(json.loads(arguments), dict)
+        except json.JSONDecodeError:
+            return False
+
+    def _provider_transaction_units(self, messages: list[dict]) -> list[list[dict]]:
+        units: list[list[dict]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            metadata = self._metadata_dict(message)
+            tool_calls = metadata.get("tool_calls") if message["role"] == "assistant" else None
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list) or not tool_calls:
+                    index += 1
+                    continue
+                call_ids = [call.get("id") for call in tool_calls if isinstance(call, dict)]
+                valid_calls = all(
+                    isinstance(call, dict)
+                    and call.get("type") == "function"
+                    and isinstance(call.get("function"), dict)
+                    and isinstance(call["function"].get("name"), str)
+                    and call["function"]["name"]
+                    and self._is_valid_tool_arguments(call["function"].get("arguments"))
+                    for call in tool_calls
+                )
+                if not valid_calls or len(call_ids) != len(tool_calls) or not all(call_ids) or len(set(call_ids)) != len(call_ids):
+                    index += 1
+                    continue
+                results = messages[index + 1:index + 1 + len(call_ids)]
+                result_ids = [
+                    self._metadata_dict(result).get("tool_call_id")
+                    for result in results
+                    if result["role"] == "tool"
+                ]
+                if len(results) == len(call_ids) and set(result_ids) == set(call_ids) and len(set(result_ids)) == len(result_ids):
+                    units.append([message, *results])
+                    index += len(results) + 1
+                    continue
+                index += 1
+                while index < len(messages) and messages[index]["role"] == "tool":
+                    index += 1
+                continue
+            if message["role"] not in {"user", "assistant"}:
+                index += 1
+                continue
+            units.append([message])
+            index += 1
+        return units
+
+
     async def get_context_messages(self) -> list[dict]:
         session_id = self._require_active_session_id()
         summaries = await get_session_summary_spans(session_id)
+        units = self._provider_transaction_units(await get_session_messages(session_id))
         messages = await get_session_messages(session_id)
         context = []
         if summaries:
             summary_text = "\n\n".join(summary["content"] for summary in summaries)
             context.append({"role": "system", "content": f"Earlier in this session:\n{summary_text}"})
-        for message in messages:
-            role = message["role"]
-            metadata = message.get("metadata") or {}
-            if role == "assistant":
-                context_message = {"role": "assistant", "content": message["content"]}
-                if metadata.get("tool_calls"):
-                    context_message["tool_calls"] = metadata["tool_calls"]
-                context.append(context_message)
-            elif role == "user":
-                context.append({"role": "user", "content": message["content"]})
-            elif role == "tool" and metadata.get("tool_call_id"):
-                context.append({
-                    "role": "tool",
-                    "tool_call_id": metadata["tool_call_id"],
-                    "content": message["content"],
-                })
+        for unit in units:
+            for message in unit:
+                role = message["role"]
+                metadata = self._metadata_dict(message)
+                if role == "assistant":
+                    context_message = {"role": "assistant", "content": message["content"]}
+                    if metadata.get("tool_calls"):
+                        context_message["tool_calls"] = metadata["tool_calls"]
+                    context.append(context_message)
+                elif role == "user":
+                    context.append({"role": "user", "content": message["content"]})
+                else:
+                    context.append({
+                        "role": "tool",
+                        "tool_call_id": metadata["tool_call_id"],
+                        "content": message["content"],
+                    })
         return context
 
     async def check_and_compress(self, tool_schemas_text: str = ""):
@@ -209,59 +273,52 @@ class SessionManager:
         return await self._compress(messages, aggressive=aggressive)
 
     async def _compress(self, messages: list[dict], aggressive: bool = False) -> bool:
+        units = self._provider_transaction_units(messages)
+        if len(units) < 2:
+            return False
+
         tail_budget = omega_settings.tail_preserve_tokens
         if aggressive:
             tail_budget = tail_budget // 2
 
-        tail_tokens = 0
-        tail_start_idx = len(messages)
-        for i in range(len(messages) - 1, -1, -1):
-            msg_tokens = estimate_tokens(messages[i]["content"])
-            if tail_tokens + msg_tokens > tail_budget:
-                tail_start_idx = i + 1
+        tail_start = len(units) - 1
+        tail_tokens = sum(estimate_tokens(message["content"]) for message in units[tail_start])
+        for index in range(len(units) -2, -1, -1):
+            unit_tokens = sum(estimate_tokens(messages["content"]) for message in units[index])
+            if tail_tokens + unit_tokens > tail_budget:
                 break
-            tail_tokens += msg_tokens
+            tail_tokens += unit_tokens
+            tail_start = index
 
-        if tail_start_idx == len(messages) or tail_start_idx <= 1:
+        if tail_start == 0:
             logger.warning(
-                "nothing to compress - tail covers almost entire conversation"
+                "nothing to compress - tail covers the complete provider-valid conversation"
             )
             return False
 
-        compress_span = messages[:tail_start_idx]
-        if not compress_span:
-            return False
-
-        pruned_count = 0
-        for msg in compress_span:
-            if msg.get("tool_name") and len(msg["content"]) > 200:
-                pruned_count += 1
-
-        conversation_text = self._format_message_for_summary(compress_span)
-        summary = await self.llm_client.generate_answer(
-            COMPRESSION_PROMPT, conversation_text
+        compress_span = [message for unit in units[:tail_start] for message in unit]
+        pruned_count = sum(
+            1 for message in compress_span
+            if message.get("tool_name") and len(message["content"]) > 200
         )
-        await create_session_summary(
+        summary = await self.llm_client.generate_answer(
+            COMPRESSION_PROMPT, self._format_message_for_summary(compress_span)
+        )
+        message_ids = [str(message["id"]) for message in compress_span]
+        await create_compression_summary_and_mark(
             session_id=self._require_active_session_id(),
             summary_kind="emergency_compression" if aggressive else "standard_compression",
             content=summary,
-            first_message_id=str(compress_span[0]["id"]),
-            last_message_id=str(compress_span[-1]["id"]),
-            message_count=len(compress_span),
+            first_message_id=message_ids[0],
+            last_message_id=message_ids[-1],
+            message_ids=message_ids,
             metadata={
-                "trigger": "emergency_compression"
-                if aggressive
-                else "standard_compression",
+                "trigger": "emergency_compression" if aggressive else "standard_compression",
                 "pruned_tool_outputs": pruned_count,
             },
         )
-
-        msg_ids = [m["id"] for m in compress_span if "id" in m]
-        if msg_ids:
-            await mark_messages_compressed(msg_ids)
-
         logger.info(
-            f"Compressed {len(compress_span)} messages into summary"
+            f"Compressed {len(compress_span)} messages into summary "
             f"(pruned {pruned_count} tool outputs, aggressive={aggressive})"
         )
         return True
