@@ -190,10 +190,12 @@ class AgentLoop:
         tool_results_seen_this_turn = False
         turn_scratchpad: list[str] = []
         turn_context = TurnContextManager()
+        execution_state = TurnExecutionState(user_message)
         total_usage: dict[str, int] = {}
 
         while True:
             current_system_content = system_context + "\n\n" + EXEC_HARNESS
+            current_system_content += "\n\n[PRIVATE TURN EXECUTION STATE]\n" + execution_state.decision_context()
             if turn_scratchpad:
                 current_system_content += "\n\n[CURRENT SCRATCHPAD NOTES]\n" + "\n".join(
                     f"- {note}" for note in turn_scratchpad
@@ -279,24 +281,6 @@ class AgentLoop:
                 ],
             }
             messages.append(assistant_msg)
-            
-            if not response_text.strip():
-                logger.warning("structured reasoning enforcer: LLM emitted tool calls without visible reasoning")
-                error_message = (
-                    "[SYSTEM: You attempted to call a tool without explaining your reasoning first"
-                    "State your thought process and plan before calling any tools"
-                )
-                await self.session_manager.add_message(
-                    "assistant", response_text, metadata={"tool_calls": assistant_msg["tool_calls"]}
-                )
-                for tool_call in streamed_tool_calls:
-                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name, metadata={"tool_call_id": tool_call.id})
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": error_message,
-                    })
-                continue
 
             await self.session_manager.add_message("assistant", response_text, metadata={"tool_calls": assistant_msg["tool_calls"]})
             safe_tool_calls = []
@@ -328,6 +312,10 @@ class AgentLoop:
                         "sources": all_sources,
                         "tool_calls": tool_calls_log,
                     }
+                    execution_state.record_tool_result(
+                        tool_call.name,
+                        {"success": False, "error": error_message, "result_summary": error_message},
+                    )
                     yield AgentEvent.turn_complete(result, total_usage)
                     return
                 safe_tool_calls.append(tool_call)
@@ -351,7 +339,7 @@ class AgentLoop:
                 yield AgentEvent.tool_started(tool_call.name)
             executed_results = await asyncio.gather(*(run_tool(tool_call) for tool_call in safe_tool_calls))
 
-            for index, (tool_call, result) in enumerate(executed_results):
+            for tool_call, result in executed_results:
                 summary = result.get("result_summary", "no summary")
                 tool_calls_log.append({
                     "tool": tool_call.name,
@@ -359,6 +347,7 @@ class AgentLoop:
                     "result_summary": summary,
                 })
                 tool_results_seen_this_turn = True
+                execution_state.record_tool_result(tool_call.name, result)
                 if result.get("sources"):
                     all_sources.extend(result["sources"])
                 if result.get("scratchpad_note"):
@@ -366,19 +355,11 @@ class AgentLoop:
 
                 raw_tool_content = result.get("answer", result.get("error", "No result"))
                 tool_content = turn_context.truncate_and_cache(tool_call.name, raw_tool_content)
-                await self.session_manager.add_message("tool", tool_content, tool_name=tool_call.name, metadata={"tool_call_id"})
-                
-                ephemeral_content = tool_content
-                if index == len(executed_results) - 1:
-                    ephemeral_content += (
-                        f"\n\n[SYSTEM: You have completed {tool_round} of"
-                        f"{omega_settings.max_tool_rounds_per_turn} tool rounds. Evaluate the results above"
-                        "If you have enough information to fully answer the user, do so. If not state what is missing and use another tool"
-                    )
+                await self.session_manager.add_message("tool", tool_content, tool_name=tool_call.name, metadata={"tool_call_id": tool_call.id})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": ephemeral_content,
+                    "content": tool_content,
                 })
                 yield AgentEvent.tool_completed(tool_call.name, summary)
 
