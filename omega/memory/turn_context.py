@@ -1,51 +1,76 @@
+from unittest import result
 import uuid
-import math
 import logging
 
 logger = logging.getLogger("TurnContextManager")
 
 class TurnContextManager:
-    def __init__(self, chunk_size: int = 2000):
+    def __init__(self, chunk_size: int = 2000, max_cached_chars: int = 16000):
+        if chunk_size < 1 or max_cached_chars < 0:
+            raise ValueError("turn-context limits must be non-negative")
         self.chunk_size = chunk_size
-        self.overflow_cache = {}
+        self.max_cached_chars = max_cached_chars
+        self.cached_chars = 0
+        self.overflow_cache: dict[str, list[str]] = {}
 
     def truncate_and_cache(self, tool_name: str, content: str) -> str:
         if len(content) <= self.chunk_size:
             return content
 
-        result_id = f"res_{uuid.uuid4().hex[:6]}"
+        first_chunk = content[:self.chunk_size]
+        remaining_content = content[self.chunk_size:]
+        cache_capacity = max(0, self.max_cached_chars - self.cached_chars)
+        cached_content = remaining_content[:cache_capacity]
+        omitted_chars = len(remaining_content) - len(cached_content)
 
-        chunks = []
-        for i in range(0, len(content), self.chunk_size):
-            chunks.append(content[i:i + self.chunk_size])
+        if not cached_content:
+            logger.warning(
+                f"tool_result truncated without overflow cache: tool={tool_name} remaining_chars={len(remaining_content)}"
+            )
+            return first_chunk + (
+                "\n\n[TOOL RESULT TRUNCATED: additional content was not retained because "
+                "this turn's overflow budget is exhausted]"
+            ) 
 
+        result_id = f"res_{uuid.uuid4().hex[:8]}"
+        chunks = [first_chunk]
+        chunks.extend(
+            cached_content[index:index + self.chunk_size]
+            for index in range(0, len(cached_content), self.chunk_size)
+        )
         self.overflow_cache[result_id] = chunks
-        remaining_chars = len(content) - self.chunk_size
-        total_chunks = len(chunks)
+        self.cached_chars += len(cached_content)
+        continuation_count = len(chunks) - 1
+        omission_note = ""
+        if omitted_chars:
+            omission_note = f" {omitted_chars} additional characters were not retained for this turn."
 
-        notice = (
-            f"\n\n[SYSTEM: result truncated to protect context window"
-            f"{remaining_chars} characters remaining across {total_chunks - 1} more chunks. "
-            f"Use the `read_overflow` tool with result_id='{result_id} and chunk_index=1 to {total_chunks - 1} to read the rest ]"
+        logger.info(
+            f"tool result truncated: tool={tool_name} cached_chars={len(cached_content), self.max_cached_chars - self.cached_chars}"
+        )
+        return first_chunk + (
+            "\n\n[TOOL RESULT TRUNCATED: "
+            f"result_id='{result_id}' has {continuation_count} cached continuation chunk(s)"
+            f"with chunk_index values 1 through {continuation_count}"
+            f"Use read_overflow with result_id='{result_id}' and a chunk_index to read one.]"
+            f"{omission_note}"
         )
 
-        logger.info(f"Context protected: {tool_name} returned {len(content)} chars. Cached as {result_id}")
-
-        return chunks[0] + notice
-
     def read_chunk(self, result_id: str, chunk_index: int) -> dict:
-        if result_id not in self.overflow_cache:
-            return {"success": False, "error": f"result_id '{result_id}' not found or expired"}
-
         chunks = self.overflow_cache[result_id]
+        if chunks is None:
+            return {
+                "success": False,
+                "error": f"result_id '{result_id}' was not retained for this turn",
+            }
         if chunk_index < 1 or chunk_index >= len(chunks):
             return {"success": False, "error": f"chunk_index {chunk_index} is out of bounds (1 to {len(chunks) - 1})."}
 
         chunk_data = chunks[chunk_index]
-
-        is_last = chunk_index == len(chunks) - 1
-        footer = "\n\n[End of result.]" if is_last else f"\n\n[SYSTEM: Chunk {chunk_index} of {len(chunks)-1}. Use read_overflow for next chunk]"
-
+        if chunk_index == len(chunks) - 1:
+            footer = "\n\n[End of cached result.]"
+        else:
+            footer =(f"\n\n[Cached Chunk {chunk_index} of {len(chunks)-1}. Use read_overflow with result_id='{result_id}' and chunk_index={chunk_index + 1} for the next cached chunk.]")
         return {
             "success": True,
             "answer": chunk_data + footer

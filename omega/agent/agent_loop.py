@@ -33,6 +33,8 @@ class AgentLoop:
             "result_summary": summary,
         })
         execution_state.record_tool_result(tool_call.name, result)
+        if result.get("scratchpad_note"):
+            execution_state.record_working_note(result["scratchpad_note"])
         if result.get("sources"):
             all_sources.extend(result["sources"])
 
@@ -70,19 +72,15 @@ class AgentLoop:
 
         tool_calls_log = []
         all_sources = []
-        loop_detector = LoopDetector(omega_settings.max_tool_rounds_per_turn)   
+        loop_detector = LoopDetector(omega_settings.max_tool_calls_per_turn)   
         tool_round = 0
         tool_results_seen_this_turn = False
-        turn_scratchpad = []
-        turn_context = TurnContextManager()
-        execution_state = TurnExecutionState(user_message)
+        turn_context = TurnContextManager(chunk_size=omega_settings.tool_result_chunk_chars, max_cached_chars=omega_settings.max_turn_overflow_chars)
+        execution_state = TurnExecutionState(user_message, max_items=omega_settings.max_turn_execution_items, max_text=omega_settings.max_turn_execution_text)
 
         while True:
             current_system_content = system_context + "\n\n" + EXEC_HARNESS
             current_system_content += "\n\n[PRIVATE TURN EXECUTION STATE]\n" + execution_state.decision_context()
-            if turn_scratchpad:
-                scratchpad_text = "\n\n[CURRENT SCRATCHPAD NOTES]\n" + "\n".join(f"- {note}" for note in turn_scratchpad)
-                current_system_content += scratchpad_text
 
             messages[0]["content"] = current_system_content
 
@@ -170,8 +168,7 @@ class AgentLoop:
                     messages=messages, tool_calls_log=tool_calls_log, all_sources=all_sources,
                 )
                 tool_results_seen_this_turn = True
-                if result.get("scratchpad_note"):
-                    turn_scratchpad.append(result["scratchpad_note"])
+
 
     async def process_stream(self, user_message: str, *, resume: bool = False) -> AsyncIterator[AgentEvent]:
         active_session_id = await self.session_manager.ensure_session(resume=resume)
@@ -192,21 +189,16 @@ class AgentLoop:
         messages = [{"role": "system", "content": system_context}] + conversation
         tool_calls_log: list[dict] = []
         all_sources: list[dict] = []
-        loop_detector = LoopDetector(omega_settings.max_tool_rounds_per_turn)
+        loop_detector = LoopDetector(omega_settings.max_tool_calls_per_turn)
         tool_round = 0
         tool_results_seen_this_turn = False
-        turn_scratchpad: list[str] = []
-        turn_context = TurnContextManager()
-        execution_state = TurnExecutionState(user_message)
+        turn_context = TurnContextManager(chunk_size=omega_settings.tool_result_chunk_chars, max_cached_chars=omega_settings.max_turn_overflow_chars)
+        execution_state = TurnExecutionState(user_message, max_items=omega_settings.max_turn_execution_items, max_text=omega_settings.max_turn_execution_text)
         total_usage: dict[str, int] = {}
 
         while True:
             current_system_content = system_context + "\n\n" + EXEC_HARNESS
             current_system_content += "\n\n[PRIVATE TURN EXECUTION STATE]\n" + execution_state.decision_context()
-            if turn_scratchpad:
-                current_system_content += "\n\n[CURRENT SCRATCHPAD NOTES]\n" + "\n".join(
-                    f"- {note}" for note in turn_scratchpad
-                )
             messages[0]["content"] = current_system_content
             response_parts: list[str] = []
             streamed_tool_calls = []
@@ -341,8 +333,6 @@ class AgentLoop:
                     tool_calls_log=tool_calls_log, all_sources=all_sources
                 )
                 tool_results_seen_this_turn = True
-                if result.get("scratchpad_note"):
-                    turn_scratchpad.append(result["scratchpad_note"])
                 yield AgentEvent.tool_completed(tool_call.name, summary)
 
     async def close_session(self):

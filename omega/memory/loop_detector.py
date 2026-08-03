@@ -34,10 +34,10 @@ class LoopDetector:
         )
 
     def record_call(self, tool_name: str, arguments: dict) -> ToolCallDecision:
-        call_signature= self._signature(tool_name, arguments)
+        call_signature = self._signature(tool_name, arguments)
         self.call_history.append(call_signature)
 
-        if len(self.call_history) >= self.max_calls_per_turn:
+        if len(self.call_history) > self.max_calls_per_turn:
             message = (
                 "Tool call blocked: the per-turn tool-call limit has been reached"
                 "Use the information already available or answer with the limitation"
@@ -59,7 +59,7 @@ class LoopDetector:
             return ToolCallDecision(False, "duplicate_call", message)
 
         tool_count = sum(1 for recorded_name, _ in self.call_history if recorded_name == tool_name)
-        if tool_count >= self.repeat_threshold:
+        if tool_count > self.repeat_threshold:
             message = (
                 f"Tool call blocked: {tool_name} has already been used repeatedly in this turn"
                 "Use the information already available or choose a different tool"
@@ -67,6 +67,6 @@ class LoopDetector:
             logger.warning(
                 f"repeated tool blocked: tool={tool_name}, count={tool_count}, threshold={self.repeat_threshold}"
             )
-            return ToolCallDecision(False, "repated_tool", message)
+            return ToolCallDecision(False, "repeated_tool", message)
 
         return _ALLOWED
