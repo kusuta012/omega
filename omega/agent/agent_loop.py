@@ -25,6 +25,32 @@ class AgentLoop:
         self.session_manager = SessionManager()
         self.tools_schema_text = json.dumps(TOOLS_OPENAI_FORMAT)
 
+    async def _record_tool_result(self, tool_call, result: dict, *, turn_context: TurnContextManager, execution_state: TurnExecutionState, messages: list[dict], tool_calls_log: list[dict], all_sources: list[dict]) -> str:
+        summary = result.get("result_summary", "no summary")
+        tool_calls_log.append({
+            "tool": tool_call.name,
+            "input": tool_call.arguments,
+            "result_summary": summary,
+        })
+        execution_state.record_tool_result(tool_call.name, result)
+        if result.get("sources"):
+            all_sources.extend(result["sources"])
+
+        raw_tool_content = result.get("answer", result.get("error", "No result"))
+        tool_content = turn_context.truncate_and_cache(tool_call.name, raw_tool_content)
+        await self.session_manager.add_message(
+            "tool",
+            tool_content,
+            tool_name=tool_call.name,
+            metadata={"tool_call_id": tool_call.id},
+        )
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": tool_content,
+        })
+        return summary
+
     async def process(self, user_message: str, *, session_id: str | None = None) -> dict:
         active_session_id = await self.session_manager.ensure_session(session_id=session_id)
         async with session_turn_locks.acquire(active_session_id):
@@ -44,7 +70,7 @@ class AgentLoop:
 
         tool_calls_log = []
         all_sources = []
-        loop_detector = LoopDetector()
+        loop_detector = LoopDetector(omega_settings.max_tool_rounds_per_turn)   
         tool_round = 0
         tool_results_seen_this_turn = False
         turn_scratchpad = []
@@ -102,64 +128,50 @@ class AgentLoop:
 
             await self.session_manager.add_message("assistant", tool_decision_text, metadata={"tool_calls": assistant_msg["tool_calls"]})
 
+            rejected_results: dict[str, dict] = {}
             safe_tool_calls = []
             for tc in response.tool_calls:
                 if tool_results_seen_this_turn and tc.name in DURABLE_MEMORY_TOOLS:
                     err = f"{tc.name} blocked: tool results exist since the current user message"
                     logger.warning(err)
-                    await self.session_manager.add_message("tool", err, tool_name=tc.name, metadata={"tool_call_id": tc.id})
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": err})
-                    execution_state.record_tool_result(
-                        tc.name, {"success": False, "error": err, "results_summary": err}
-                    )
+                    rejected_results[tc.id] = {
+                        "success": False,
+                        "error": err,
+                        "result_summary": f"{tc.name}: blocked by memory safety rule",
+                    }
                     continue
 
-                if loop_detector.record_call(tc.name, tc.arguments):
-                    bail = "I noticed I was repeating the same operations. Let me answer with what I have so far"
-                    await self.session_manager.add_message("assistant", bail)
-                    await self.session_manager.check_and_compress(self.tools_schema_text)
-                    await self._maybe_consolidate()
-                    return {
-                        "session_id": str(self.session_manager.active_session_id),
-                        "question": user_message, "answer": bail,
-                        "sources": all_sources, "tool_calls": tool_calls_log
+                decision = loop_detector.record_call(tc.name, tc.arguments)
+                if not decision.allowed:
+                    rejected_results[tc.id] = {
+                        "success": False,
+                        "error": decision.message,
+                        "result_summary": f"{tc.name}: {decision.code}",
                     }
-
+                    continue
                 safe_tool_calls.append(tc)
 
             async def run_tool(tc):
                 logger.info(f"Executing tool: {tc.name}({tc.arguments})")
                 try:
                     result = await self.tool_executor.execute(tc.name, tc.arguments, turn_context=turn_context, memory_provenance=memory_provenance)
-                    return tc, result
+                    return tc.id, result
                 except Exception as e:
                     logger.error(f"Tool {tc.name} failed with unhandled exception: {e}")
-                    return tc, {"success": False, "error": str(e), "result_summary": f"Unhandled error: {e}"}
+                    return tc.id, {"success": False, "error": str(e), "result_summary": f"Unhandled error: {e}"}
                 
-            execution_tasks = [run_tool(tc) for tc in safe_tool_calls]
-            executed_results = await asyncio.gather(*execution_tasks)
+            executed_results = await asyncio.gather(*(run_tool(tc) for tc in safe_tool_calls))
+            results_by_call_id = {**rejected_results, **dict(executed_results)}
             
-            for tc, result in executed_results:
-                tool_calls_log.append({
-                    "tool": tc.name, "input": tc.arguments,
-                    "result_summary": result.get("result_summary", "no summary")
-                })
+            for tc in response.tool_calls:
+                result = results_by_call_id[tc.id]
+                await self._record_tool_result(
+                    tc, result, turn_context=turn_context, execution_state=execution_state,
+                    messages=messages, tool_calls_log=tool_calls_log, all_sources=all_sources,
+                )
                 tool_results_seen_this_turn = True
-                execution_state.record_tool_result(tc.name, result)
-
-                if result.get("sources"):
-                    all_sources.extend(result["sources"])
                 if result.get("scratchpad_note"):
                     turn_scratchpad.append(result["scratchpad_note"])
-                
-                raw_tool_content = result.get("answer", result.get("error", "No result"))
-                tool_content = turn_context.truncate_and_cache(tc.name, raw_tool_content)
-
-                await self.session_manager.add_message("tool", tool_content, tool_name=tc.name, metadata={"tool_call_id": tc.id})
-
-                messages.append({
-                    "role": "tool", "tool_call_id": tc.id, "content": tool_content
-                })
 
     async def process_stream(self, user_message: str, *, resume: bool = False) -> AsyncIterator[AgentEvent]:
         active_session_id = await self.session_manager.ensure_session(resume=resume)
@@ -180,7 +192,7 @@ class AgentLoop:
         messages = [{"role": "system", "content": system_context}] + conversation
         tool_calls_log: list[dict] = []
         all_sources: list[dict] = []
-        loop_detector = LoopDetector()
+        loop_detector = LoopDetector(omega_settings.max_tool_rounds_per_turn)
         tool_round = 0
         tool_results_seen_this_turn = False
         turn_scratchpad: list[str] = []
@@ -278,41 +290,27 @@ class AgentLoop:
             messages.append(assistant_msg)
 
             await self.session_manager.add_message("assistant", response_text, metadata={"tool_calls": assistant_msg["tool_calls"]})
+            rejected_results: dict[str, dict] = {}
             safe_tool_calls = []
             for tool_call in streamed_tool_calls:
                 if tool_results_seen_this_turn and tool_call.name in DURABLE_MEMORY_TOOLS:
-                    error_message = (
-                        f"{tool_call.name} blocked: tool results exist since the current user message"
-                    )
-                    logger.warning(error_message)
-                    await self.session_manager.add_message("tool", error_message, tool_name=tool_call.name, metadata={"tool_call_id": tool_call.id})
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": error_message,
-                    })
-                    yield AgentEvent.tool_completed(tool_call.name, "blocked by memory safety rule")
+                    err = (f"{tool_call.name} blocked: tool results exist since the current user message")
+                    logger.warning(err)
+                    rejected_results[tool_call.id] = {
+                        "success": False,
+                        "error": err,
+                        "result_summary": f"{tool_call.name}: blocked by memory safety rule",
+                    }
                     continue
 
-                if loop_detector.record_call(tool_call.name, tool_call.arguments):
-                    bail = "I noticed I was repeating the same operations, let me answer with what I have so far"
-                    yield AgentEvent.text_delta(bail)
-                    await self.session_manager.add_message("assistant", bail)
-                    await self.session_manager.check_and_compress(self.tools_schema_text)
-                    await self._maybe_consolidate()
-                    result = {
-                        "session_id": str(self.session_manager.active_session_id),
-                        "question": user_message,
-                        "answer": bail,
-                        "sources": all_sources,
-                        "tool_calls": tool_calls_log,
+                decision = loop_detector.record_call(tool_call.name, tool_call.arguments)
+                if not decision.allowed:
+                    rejected_results[tool_call.id] = {
+                        "success": False,
+                        "error": decision.message,
+                        "result_summary": f"{tool_call.name}: {decision.code}",
                     }
-                    execution_state.record_tool_result(
-                        tool_call.name,
-                        {"success": False, "error": error_message, "result_summary": error_message},
-                    )
-                    yield AgentEvent.turn_complete(result, total_usage)
-                    return
+                    continue
                 safe_tool_calls.append(tool_call)
 
             async def run_tool(tool_call):
@@ -321,10 +319,10 @@ class AgentLoop:
                     result = await self.tool_executor.execute(
                         tool_call.name, tool_call.arguments, turn_context=turn_context, memory_provenance=memory_provenance,
                     )
-                    return tool_call, result
+                    return tool_call.id, result
                 except Exception as e:
                     logger.error(f"Tool {tool_call.name} failed with an unhandled err: {e}")
-                    return tool_call, {
+                    return tool_call.id, {
                         "success": False,
                         "error": str(e),
                         "result_summary": f"Unhandled error: {e}"
@@ -333,29 +331,18 @@ class AgentLoop:
             for tool_call in safe_tool_calls:
                 yield AgentEvent.tool_started(tool_call.name)
             executed_results = await asyncio.gather(*(run_tool(tool_call) for tool_call in safe_tool_calls))
+            results_by_call_id = {**rejected_results, **dict(executed_results)}
 
-            for tool_call, result in executed_results:
-                summary = result.get("result_summary", "no summary")
-                tool_calls_log.append({
-                    "tool": tool_call.name,
-                    "input": tool_call.arguments,
-                    "result_summary": summary,
-                })
+            for tool_call in streamed_tool_calls:
+                result = results_by_call_id[tool_call.id]
+                summary = await self._record_tool_result(
+                    tool_call, result, turn_context=turn_context,
+                    execution_state=execution_state, messages=messages,
+                    tool_calls_log=tool_calls_log, all_sources=all_sources
+                )
                 tool_results_seen_this_turn = True
-                execution_state.record_tool_result(tool_call.name, result)
-                if result.get("sources"):
-                    all_sources.extend(result["sources"])
                 if result.get("scratchpad_note"):
                     turn_scratchpad.append(result["scratchpad_note"])
-
-                raw_tool_content = result.get("answer", result.get("error", "No result"))
-                tool_content = turn_context.truncate_and_cache(tool_call.name, raw_tool_content)
-                await self.session_manager.add_message("tool", tool_content, tool_name=tool_call.name, metadata={"tool_call_id": tool_call.id})
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_content,
-                })
                 yield AgentEvent.tool_completed(tool_call.name, summary)
 
     async def close_session(self):

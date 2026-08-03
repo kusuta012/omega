@@ -18,6 +18,7 @@ class OmegaSettings(BaseSettings):
     profile_inference_enabled: bool = True
     profile_inference_min_messages: int = 20
     max_tool_rounds_per_turn: int = 5
+    max_tool_calls_per_turn: int = 8
     class Config:
         env_file = ".env"
         extra = "ignore"
