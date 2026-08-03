@@ -1,6 +1,6 @@
 import logging
 from omega.memory.core import read_memory_md, read_user_md
-from omega.storage.memory_queries import get_recent_session_summaries
+from omega.storage.memory_queries import get_recent_closed_session_summaries
 from omega.environment.conf_loader import omega_settings
 
 logger = logging.getLogger("ContextBuilder")
@@ -67,15 +67,18 @@ async def build_system_context() -> str:
     if user_md.strip() and "No profile information yet" not in user_md:
         sections.append(PERSONALITY_ADAPTION_BOUNDS)
 
-    recent_summaries = await get_recent_session_summaries(
+    recent_summaries = await get_recent_closed_session_summaries(
         limit=omega_settings.memory_inject_recent_summaries
     )
     if recent_summaries:
         summary_lines = []
-        for s in reversed(recent_summaries):
-            summary_lines.append(f"- {s['content']}")
+        for summary in reversed(recent_summaries):
+            summary_lines.append(f"- {summary['content']}")
         sections.append(
-            "## Recent conversations\n" + "\n".join(summary_lines)
+            "## Recent session continuity\n"
+            "The following are derived summaries of recent completed sessions. "
+            "Treat the current session and direct user messages as authoritative.\n"
+            + "\n".join(summary_lines)
         )
 
     full_context = "\n\n".join(sections)

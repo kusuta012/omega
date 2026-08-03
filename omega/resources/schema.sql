@@ -75,6 +75,48 @@ CREATE TABLE IF NOT EXISTS memory_entries (
     metadata JSONB
 );
 
+CREATE TABLE IF NOT EXISTS session_summaries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    summary_kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    first_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+    last_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+    messages_count INT NOT NULL,
+    created_at TIMESTAMP DEFAULT now(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT chk_session_summary_kind CHECK (
+        summary_kind IN ('standard_compression', 'emergency_compression', 'session_close', 'crash_recovery')
+    ),
+    CONSTRAINT chk_session_summary_message_count CHECK (message_count >= 0),
+    CONSTRAINT chk_session_summary_source_range CHECK (
+        first_message_id IS NOT NULL AND last_message_id IS NOT NULL
+    )
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_session_summary_kind') THEN
+        ALTER TABLE session_summaries ADD CONSTRAINT chk_session_summary_kind CHECK (
+            summary_kind IN ('standard_compression', 'emergency_compression', 'session_close', 'crash_recovery')
+        );
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_session_summary_message_count') THEN
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROm pg_constraint WHERE conname = 'chk_session_summary_source_range') THEN
+        ALTER TABLE session_summaries ADD CONSTRAINT chk_session_summary_source_range CHECK (
+            first_message_id IS NOT NULL AND last_message_id IS NOT NULL
+        );
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_session_created ON session_summaries(session_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_session_compression_span
+    ON session_summaries(session_id, summary_kind, first_message_id, last_message_id)
+    WHERE summary_kind IN ('standard_compression', 'emergency_compression');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_session_final_summary
+    ON session_summaries(session_id)
+    WHERE summary_kind IN ('session_close', 'crash_recovery');
 CREATE INDEX IF NOT EXISTS idx_memory_type_date ON memory_entries(memory_type, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_memory_embedding ON memory_entries USING hnsw (embedding vector_cosine_ops);

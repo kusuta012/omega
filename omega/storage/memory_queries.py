@@ -11,6 +11,13 @@ def _message_from_row(row) -> dict:
         message["metadata"] = json.loads(metadata)
     return message
 
+def _summary_from_row(row) -> dict:
+    summary = dict(row)
+    metadata = summary.get("metadata")
+    if isinstance(metadata, str):
+        summary["metadata"] = json.loads(metadata)
+    return summary
+
 async def create_session() -> str:
     async with db_pool.acquire() as conn:
         session_id = await conn.fetchval(
@@ -164,6 +171,106 @@ async def get_recent_session_summaries(limit: int = 2) -> list[dict]:
             LIMIT $1
         """, limit)
     return [dict(r) for r in rows]
+
+async def create_session_summary(
+    session_id: str,
+    summary_kind: str,
+    content: str,
+    first_message_id: str | None,
+    last_message_id: str | None,
+    message_count: int,
+    metadata: dict | None = None,
+) -> dict:
+    allowed_kinds = {
+        "standard_compression",
+        "emergency_compression",
+        "session_close",
+        "crash_recovery"
+    }
+    if summary_kind not in allowed_kinds:
+        raise ValueError(f"Unknown session summary kind: {summary_kind}")
+    if message_count < 0:
+        raise ValueError("Session summary message_count cannot be negative")
+    if first_message_id is None or last_message_id is None:
+        raise ValueError("Session summaries require complete source-message boundaries")
+
+    metadata_json = json.dumps(metadata or {})
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO session_summaries
+                (session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            ON CONFLICT DO NOTHING
+            RETURNING id, session_id, summary_kind, content, first_message_id, last_message_id,
+                      message_count, created_at, metdata
+        """, session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata_json)
+        if row:
+            return _summary_from_row(row)
+
+        if summary_kind in {"session_close", "crash_recovery"}:
+            row = await conn.fetchrow("""
+                SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
+                    message_count, created_at, metadata
+                FROM session_summaries
+                WHERE session_id = $1
+                  AND summary_kind IN ('session_close', 'crash_recovery')
+                ORDER BY created_at ASC
+                LIMIT 1
+            """, session_id)
+        else:
+            row = await conn.fetchrow("""
+                SELECT id, session_id, summary_kind content, first_message_id, last_message_id,
+                       message_count, created_at, metadata)
+                FROM session_summaries
+                WHERE session_id = $1
+                  AND summary_kind = $2
+                  AND first_message_id = $3
+                  AND last_message_id = $4
+                LIMIT 1
+            """, session_id, summary_kind, first_message_id, last_message_id)
+    if row:
+        return _summary_from_row(row)
+    raise RuntimeError("Session summary insert did not create or locate a summary")
+    
+
+async def get_final_session_summary(session_id: str) -> dict | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
+                   message_count, created_at, metadata
+            FROM session_summaries
+            WHERE session_id = $1
+              AND summary_kind IN ('session_close', 'crash_recovery')
+            ORDER BY created_at ASC
+            LIMIT 1
+        """, session_id)
+    return _summary_from_row(row) if row else None
+
+async def get_session_summary_spans(session_id: str) -> list[dict]:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, session_id, summary_kind, content, first_message_id, last_message_id,
+                   message_count, created_at, metadata
+            FROM session_summaries
+            WHERE session_id = $1
+              AND summary_kind IN ('standard_compression', 'emergency_compression')
+            ORDER BY created_at ASC
+        """, session_id)
+    return [_summary_from_row(row) for row in rows]
+
+async def get_recent_closed_session_summaries(limit: int = 2) -> list[dict]:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ss.id, ss.session_id, ss.summary_kind, ss.content, ss.first_message_id,
+                   ss.last_message_id, ss.message_count, ss.created_at, ss.metdata
+            FROM session_summaries ss
+            JOIN sessions s ON s.id = ss.session_id
+            WHERE s.status = 'closed'
+              AND ss.summary_kind IN ('session_close', 'crash_recovery')
+            ORDER BY ss.created_at DESC
+            LIMIT $1
+        """, limit)
+    return [_summary_from_row(row) for row in rows]
 
 async def get_session_compression_summaries(session_id: str) -> list[dict]:
     async with db_pool.acquire() as conn:

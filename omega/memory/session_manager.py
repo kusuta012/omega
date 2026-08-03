@@ -7,16 +7,16 @@ from omega.storage.memory_queries import (
     close_session,
     get_session_messages,
     append_message,
-    store_memory_entry,
+    create_session_summary,
+    get_final_session_summary,
+    get_session_summary_spans,
     mark_messages_compressed,
-    get_message_span,
     get_session_compression_summaries,
     find_orphaned_sessions
 )
 from omega.memory.context_build import estimate_tokens, build_system_context
 from omega.memory.core import ensure_memory_dir
 from omega.llm.client import get_llm_provider
-from omega.embeddings.embedding_service import get_embedding_service
 from omega.environment.conf_loader import omega_settings
 
 logger = logging.getLogger("SessionManager")
@@ -45,7 +45,6 @@ class SessionManager:
         self.active_session_id: str | None = None
         self.system_context: str | None = None
         self.llm_client = get_llm_provider()
-        self.embedding_service = get_embedding_service()
         ensure_memory_dir()
 
     def _require_active_session_id(self) -> str:
@@ -63,6 +62,7 @@ class SessionManager:
             if resume_session_id:
                 return resume_session_id
 
+        await self._recover_orphaned_sessions()
         self.active_session_id = await create_session()
         self.system_context = await build_system_context()
         logger.info(f"Session started: {self.active_session_id}")
@@ -76,7 +76,8 @@ class SessionManager:
         if session is None:
             raise ValueError("Unknown session_id")
         if session["status"] == "closed":
-            await reopen_session(session_id)
+            if not await reopen_session(session_id):
+                raise RuntimeError(f"Could not reopen session {session_id}")
 
         self.active_session_id = str(session["id"])
         self.system_context = await build_system_context()
@@ -93,7 +94,6 @@ class SessionManager:
             return None
 
         session_id = str(candidate["id"])
-
         reopened = await reopen_session(session_id)
         if not reopened:
             logger.info("Resuming already-active session %s", session_id)
@@ -129,18 +129,23 @@ class SessionManager:
         self.system_context = None
 
     async def _create_session_summary_for(self, session_id: str, messages: list[dict], trigger: str = "session_close"):
+        existing = await get_final_session_summary(session_id)
+        if existing:
+            logger.info(f"Final session summary already exists for {session_id}")
+            return
+
         conversation_text = self._format_message_for_summary(messages)
         summary = await self.llm_client.generate_answer(
             SESSION_CLOSE_PROMPT, conversation_text
         )
-        embedding = self.embedding_service.generate_single_embedding(summary)
-
-        await store_memory_entry(
-            memory_type="session_summary",
+        await create_session_summary(
+            session_id=session_id,
+            summary_kind=trigger,
             content=summary,
-            embedding=embedding,
-            source_session_id=session_id,
-            metadata={"message_count": len(messages), "trigger": trigger},
+            first_message_id=str(messages[0]["id"]) if messages else None,
+            last_message_id=str(messages[-1]["id"]) if messages else None,
+            message_count=len(messages),
+            metadata={"trigger": trigger},
         )
         logger.info(
             f"Created session summary for {session_id} ({len(messages)} messages)"
@@ -154,7 +159,7 @@ class SessionManager:
 
     async def get_context_messages(self) -> list[dict]:
         session_id = self._require_active_session_id()
-        summaries = await get_session_compression_summaries(session_id)
+        summaries = await get_session_summary_spans(session_id)
         messages = await get_session_messages(session_id)
         context = []
         if summaries:
@@ -237,17 +242,14 @@ class SessionManager:
         summary = await self.llm_client.generate_answer(
             COMPRESSION_PROMPT, conversation_text
         )
-        embedding = self.embedding_service.generate_single_embedding(summary)
-
-        await store_memory_entry(
-            memory_type="session_summary",
+        await create_session_summary(
+            session_id=self._require_active_session_id(),
+            summary_kind="emergency_compression" if aggressive else "standard_compression",
             content=summary,
-            embedding=embedding,
-            source_session_id=self._require_active_session_id(),
+            first_message_id=str(compress_span[0]["id"]),
+            last_message_id=str(compress_span[-1]["id"]),
+            message_count=len(compress_span),
             metadata={
-                "message_count": len(compress_span),
-                "first_message_id": str(compress_span[0]["id"]),
-                "last_message_id": str(compress_span[-1]["id"]),
                 "trigger": "emergency_compression"
                 if aggressive
                 else "standard_compression",
@@ -283,6 +285,7 @@ class SessionManager:
         for orphan in orphans:
             orphan_id = orphan["id"]
             logger.warning(f"found orphaned session {orphan_id} - attempting crash recovery summary")
+            should_close = True
             try:
                 messages = await get_session_messages(orphan_id, include_compressed=True)
                 if len(messages) >= 2:
@@ -291,7 +294,8 @@ class SessionManager:
                 else:
                     logger.info(f"Crash recovery: orphaned session {orphan_id} had <2 messages, skipping summary")
             except Exception as e:
+                should_close = False
                 logger.error(f"Crash recovery: failed to summarize orphaned session {orphan_id}: {e}")
-
-            await close_session(orphan_id)
-            logger.info(f"Crash recovery closed orphaned session {orphan_id}")
+            if should_close:
+                await close_session(orphan_id)
+                logger.info(f"Crash recovery closed orphaned session {orphan_id}")

@@ -1,6 +1,7 @@
 import asyncpg
 import asyncio
 from contextlib import asynccontextmanager
+from importlib import resources
 from omega.environment.conf_loader import omega_settings
 
 class DatabasePool:
@@ -11,7 +12,15 @@ class DatabasePool:
     async def connect(self):
         async with self._lifecycle_lock:
             if self.pool is None:
-                self.pool = await asyncpg.create_pool(dsn=omega_settings.database_url)
+                pool = await asyncpg.create_pool(dsn=omega_settings.database_url)
+                try:
+                    schema = resources.files("omega").joinpath("resources", "schema.sql").read_text(encoding="utf-8")
+                    async with pool.acquire() as connection:
+                        await connection.execute(schema)
+                except Exception:
+                    await pool.close()
+                    raise
+                self.pool = pool
 
     async def disconnect(self):
         async with self._lifecycle_lock:
