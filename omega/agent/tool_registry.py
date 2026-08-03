@@ -65,7 +65,7 @@ TOOLS_OPENAI_FORMAT = [
         "type": "function",
         "function": {
             "name": "search_memory",
-            "description": "Search BOTH the knowledge base AND the agent's own memory of past conversations. Use this when you need to find something that might be in saved documents OR something the user you in a previous conversation. Always labels results by source (document vs memory)",
+            "description": "Search the agent's personal memory of durable facts from past conversations. Use only when the user asks about what they previously told you, their preferences, or their personal history. This never searches saved documents or the knowledge base.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -479,24 +479,21 @@ class ToolExecutor:
         if not query:
             return {"success": False, "error": "no query provided", "results_summary": "Empty query"}
 
-        result = await self.synthesis.answer_with_memory(query, top_k=5)
+        result = await self.synthesis.answer_from_personal_memory(query, top_k=5)
 
         if not result.get("sources"):
             return {
                 "success": True,
-                "answer": "I searched both your knowledge base and memory but found nothing relevant",
+                "answer": "I searched your personal memory but found nothing relevant",
                 "sources": [],
-                "result_summary": "unified search returned 0 results across KB + memory"
+                "result_summary": "personal-memory returned 0 results"
             }
-
-        kb_count = sum(1 for s in result["sources"] if s.get("source_type") == "knowledge_base")
-        mem_count = sum(1 for s in result["sources"] if s.get("source_type") == "memory")
 
         return {
             "success": True,
             "answer": result["answer"],
             "sources": result["sources"],
-            "result_summary": f"unified search: {kb_count} KB sources + {mem_count} memory entries"
+            "result_summary": f"personal-memory search: {len(result['sources'])} memory entries"
         }
 
     def _validate_memory_provenance(

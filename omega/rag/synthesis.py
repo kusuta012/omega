@@ -48,40 +48,9 @@ class Synthesis:
         query_vector = self.embedding_service.generate_single_embedding(query)
         return await search_hybrid_chunks(query, query_vector, top_k)
 
-    async def search_unified(self, query: str, top_k: int = 5) -> dict:
+    async def search_personal_memory(self, query: str, top_k: int = 5) -> list[dict]:
         rewritten = await self.rewrite_query(query)
-        query_vector = self.embedding_service.generate_single_embedding(query)
-
-        kb_results = []
-        memory_results = []
-
-        for q in rewritten:
-            qv = self.embedding_service.generate_single_embedding(q)
-            kb = await search_hybrid_chunks(q, qv, top_k)
-            mem = await search_memory_entries(q, qv, top_k)
-            kb_results.extend(kb)
-            memory_results.extend(mem)
-
-        seen_kb = set()
-        unique_kb = []
-        for r in kb_results:
-            if r["chunk_id"] not in seen_kb:
-                seen_kb.add(r["chunk_id"])
-                unique_kb.append(r)
-        unique_kb = sorted(unique_kb, key=lambda r: r.get("rrf_score", 0), reverse=True)[:top_k]
-
-        seen_mem = set()
-        unique_mem = []
-        for r in memory_results:
-            if r["id"] not in seen_mem:
-                seen_mem.add(r["id"])
-                unique_mem.append(r)
-        unique_mem = sorted(unique_mem, key=lambda r: r.get("composite_score", 0), reverse=True)[:top_k]
-
-        return {
-            "kb_chunks": unique_kb,
-            "memory_entries": unique_mem,
-        }
+        return await search_memory_entries(query, query_vector, top_k)
 
     async def answer_question(self, query: str, top_k: int = 5) -> dict:
         relevant_chunks = await self.search_knowledge(query, top_k)
@@ -118,50 +87,36 @@ class Synthesis:
             "sources": sources_meta
         }
 
-    async def answer_with_memory(self, query: str, top_k: int = 5) -> dict:
-        unified = await self.search_unified(query, top_k)
+    async def answer_from_personal_memory(self, query: str, top_k: int = 5) -> dict:
+        entries = await self.search_personal_memory(query, top_k)
+        if not entries:
+            return {
+                "question": query,
+                "answer": "I couldn't find anything relevant in your personal memory",
+                "sources": [],
+                "memory_entry_ids": [],
+            }
+        
         context_passages = []
         sources_meta = []
         memory_entry_ids = []
 
-        idx = 1
-        for chunk in unified["kb_chunks"]:
-            label = f"Source {idx}"
-            source_desc = f"{chunk['source_title']} ({chunk['source_ref'] or 'saved document'})"
-            context_passages.append(f"[{label} - FROM SAVED DOCUMENT: {source_desc}]\n{chunk['chunk_text']}")
+        for index, entry in enumerate(entries, start=1):
+            label = f"Memory {index}"
+            context_passages.append(f"[{label}]: recalled personal memory]\n{entry['content']}")
             sources_meta.append({
-                "label": label, "title": chunk['source_title'],
-                "source_type": "knowledge_base", "score": round(chunk.get("rrf_score", 0), 4)
-            })
-            idx += 1
-
-        for entry in unified["memory_entries"]:
-            label = f"memory {idx}"
-            context_passages.append(f"[{label} - FROM YOUR MEMORY: recalled from past conversations]\n{entry['content']}")
-            sources_meta.append({
-                "label": label, "title": f"Memory: {entry['memory_type']}",
-                "source_type": "memory", "score": round(entry.get("composite_score", 0), 4)
+                "label": label,
+                "title": f"Memory: {entry['memory_type']}",
+                "source_type": "memory",
+                "score": round(entry.get("composite_score", 0), 4),
             })
             memory_entry_ids.append(entry["id"])
-            idx += 1
-
-        if not context_passages:
-            return {
-                "question": query,
-                "answer": "I couldn't find anything relevant in your knowledge base or memory",
-                "sources": [], "memory_entry_ids": []
-            }
+        prompt = """Answer the user's question using only the recalled personal-memory entries below.
+If they do not contain the answer, say so. Do not present these entries as saved documents or knowledge-base sources."""
+        memory_context = "\n\n".join(context_passages)
+        user_prompt = f"QUESTION:\n{query}\n\nPERSONAL MEMORY:\n{memory_context}\n\nANSWER:"
+        answer = await self.llm_client.generate_answer(prompt, user_prompt)
         
-        compiled_context = "\n\n".join(context_passages)
-
-        mem_aware_prompt = SYSTEM_PROMPT + """
-IMPORTANT: Some context passages are labeled as "FROM SAVED DOCUMENT" and others as "FROM YOUR MEMORY"
-When citing document sources, use [Source X], when citing from memory, say "Based on what I recall from our past coversations..."
-Always make the distinction clear the user """
-
-        user_prompt = f"QUESTION:\n{query}\n\nCONTEXT:\n{compiled_context}\n\nANSWER:"
-        answer = await self.llm_client.generate_answer(mem_aware_prompt, user_prompt)
-
         for entry_id in memory_entry_ids:
             try:
                 await record_memory_access(entry_id)

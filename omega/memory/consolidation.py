@@ -27,7 +27,7 @@ DECAY_FLOOR = 0.05
 CORE_MEMORY_MAX_ENTRIES = 10
 
 PATTERN_PROMPT = """You are Omega's memory curator. Review these recent memory entries
-(session summaries and extracted facts) and identify TWO things:
+(durable personal facts) and identify TWO things:
 
 1. RECURRING PATTERNS: Any themes, topics, or behaviors that appear across multiple entries.
    Simple, concrete observations only. Examples: "mentioned work stress in 4 of the last 6 sessions",
