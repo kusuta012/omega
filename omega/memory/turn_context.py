@@ -1,4 +1,3 @@
-from unittest import result
 import uuid
 import logging
 
@@ -57,7 +56,7 @@ class TurnContextManager:
         )
 
     def read_chunk(self, result_id: str, chunk_index: int) -> dict:
-        chunks = self.overflow_cache[result_id]
+        chunks = self.overflow_cache.get[result_id]
         if chunks is None:
             return {
                 "success": False,

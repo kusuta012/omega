@@ -40,6 +40,7 @@ class TurnExecutionState:
         if not compact_note or compact_note in self.working_notes:
             return False
         self.working_notes.append(compact_note)
+        del self.working_notes[:-self.max_items]
         return True
 
     def decision_context(self) -> str:

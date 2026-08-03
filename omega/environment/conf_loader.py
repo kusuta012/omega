@@ -22,7 +22,7 @@ class OmegaSettings(BaseSettings):
     tool_result_chunk_chars: int = 2000
     max_turn_overflow_chars: int = 16000
     max_turn_execution_items: int = 6
-    max_turn_execution_items: int = 320
+    max_turn_execution_text: int = 320
     class Config:
         env_file = ".env"
         extra = "ignore"
