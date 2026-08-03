@@ -222,7 +222,6 @@ class SessionManager:
         session_id = self._require_active_session_id()
         summaries = await get_session_summary_spans(session_id)
         units = self._provider_transaction_units(await get_session_messages(session_id))
-        messages = await get_session_messages(session_id)
         context = []
         if summaries:
             summary_text = "\n\n".join(summary["content"] for summary in summaries)
@@ -283,8 +282,8 @@ class SessionManager:
 
         tail_start = len(units) - 1
         tail_tokens = sum(estimate_tokens(message["content"]) for message in units[tail_start])
-        for index in range(len(units) -2, -1, -1):
-            unit_tokens = sum(estimate_tokens(messages["content"]) for message in units[index])
+        for index in range(len(units) - 2, -1, -1):
+            unit_tokens = sum(estimate_tokens(message["content"]) for message in units[index])
             if tail_tokens + unit_tokens > tail_budget:
                 break
             tail_tokens += unit_tokens

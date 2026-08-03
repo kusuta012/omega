@@ -199,7 +199,7 @@ async def _create_session_summary(
         ON CONFLICT DO NOTHING
         RETURNING id, session_id, summary_kind, content, first_message_id, last_message_id,
                   message_count, created_at, metadata
-    """, session_id, summary_kind, content, first_message_id, last_message_id, message_count, metadata_json)
+    """, session_id, summary_kind, content, first_message_id, last_message_id, message_count, json.dumps(metadata or {}))
     if row:
         return _summary_from_row(row)
 
@@ -240,10 +240,10 @@ async def create_session_summary(
     async with db_pool.acquire() as conn:
         return await _create_session_summary(
             conn, session_id, summary_kind, content, first_message_id,
-            last_message_id, message_count, metdata,
+            last_message_id, message_count, metadata,
         )
 
-async def create_session_summary_and_mark(
+async def create_compression_summary_and_mark(
     session_id: str,
     summary_kind: str,
     content: str,
