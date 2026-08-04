@@ -40,7 +40,7 @@ async def replace_item_content_and_chunks(
                 raise ValueError(f"Item record {item_id} not found")
             await conn.execute("DELETE FROM chunks WHERE item_id = $1", item_id)
             await conn.executemany("""
-                INSERT INTO chunks (item_id, chunk_index, content, page_start, page_end, embedding)
+                INSERT INTO chunks (item_id, chunk_index, content, start_offset, end_offset, page_start, page_end, embedding)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
             """, records)
             if job_id is not None:

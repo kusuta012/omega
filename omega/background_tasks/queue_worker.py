@@ -49,7 +49,7 @@ def parse_and_embed_item(item: dict, result_queue):
     try:
         parsed = extract_item_content(item)
         chunks = chunk_splitter.split_document(parsed['raw_content'])
-        embeddings = embedding_service.generate_embeddings(chunks)
+        embeddings = embedding_service.generate_embeddings([chunk['content'] for chunk in chunks])
         result_queue.put(("ok", parsed, chunks, embeddings))
     except Exception as err:
         result_queue.put(("error", str(err)))
