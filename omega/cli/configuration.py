@@ -2,12 +2,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import httpx
+from omega.llm.provider_specs import (DEFAULT_PROVIDER, PROVIDER_SPECS, normalize_provider_settings)
 
 ENV_PATH = Path(".env")
 PROVIDERS = {
-    "openai_compatible": ("OpenAI", "https://api.openai.com", "gpt-5.5"),
-    "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "deepseek/deepseek-v4-flash"),
-    "anthropic": ("Anthropic", "https://api.anthropic.com", "claude-5-sonnet"),
+    name: (spec.display_name, spec.base_url, spec.model)
+    for name, spec in PROVIDER_SPECS.items()
 }
 
 def read_env(path: Path = ENV_PATH) -> dict[str, str]:
@@ -31,18 +31,15 @@ def write_env(updates: dict[str, str], path: Path = ENV_PATH) -> None:
     temporary.replace(path)
 
 async def validate_llm_settings(provider: str, base_url: str, api_key: str, model: str) -> None:
-    if provider not in PROVIDERS:
-        raise ValueError(f"Unsupported provider: {provider}")
-    if not api_key.strip():
-        raise ValueError("An API key is required")
-    if provider == "anthropic":
-        url = base_url.rstrip("/") + "/v1/messages"
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-        payload = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "OK"}]}
+    settings = normalize_provider_settings(provider, base_url, api_key, model)
+    if settings.spec.protocol == "anthropic":
+        url = settings.base_url + "/v1/messages"
+        headers = {"x-api-key": settings.api_key, "anthropic-version": "2023-06-01"}
+        payload = {"model": settings.model, "max_tokens": 1, "messages": [{"role": "user", "content": "OK"}]}
     else:
-        url = base_url.rstrip("/") + "/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}"}
-        payload = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "OK"}]}
+        url = settings.base_url + "/chat/completions"
+        headers = {"Authorization": f"Bearer {settings.api_key}"}
+        payload = {"model": settings.model, "max_tokens": 1, "messages": [{"role": "user", "content": "OK"}]}
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
@@ -54,12 +51,15 @@ def prompt_llm_settings(existing: dict[str, str]) -> dict[str, str]:
     names = list(PROVIDERS)
     for index, provider in enumerate(names, 1):
         print(f"  {index}. {PROVIDERS[provider][0]}")
-    selected = input(f"Provider [{existing.get('LLM_PROVIDER', 'openrouter')}]: ").strip()
-    provider = names[int(selected) - 1] if selected.isdigit() and 1 <= int(selected) <= len(names) else selected or existing.get("LLM_PROVIDER", "openrouter")
+    selected = input(f"Provider [{existing.get('LLM_PROVIDER', DEFAULT_PROVIDER)}]: ").strip()
+    provider = (names[int(selected) - 1] if selected.isdigit() and 1 <= int(selected) <= len(names) else selected or existing.get("LLM_PROVIDER", DEFAULT_PROVIDER)).lower()
     if provider not in PROVIDERS:
         raise ValueError(f"Unsupported provider: {provider}")
     _, default_url, default_model = PROVIDERS[provider]
-    base_url = input(f"Base URL [{existing.get('LLM_BASE_URL', default_url)}]: ").strip() or existing.get("LLM_BASE_URL", default_url)
-    model = input(f"Model [{existing.get('LLM_MODEL', default_model)}]: ").strip() or existing.get("LLM_MODEL", default_model)
+    previous_provider = existing.get("LLM_PROVIDER", "").strip().lower()
+    default_base_url = existing.get("LLM_BASE_URL", default_url) if previous_provider == provider else default_url
+    default_model_value = existing.get("LLM_MODEL", default_model) if previous_provider == provider else default_model
+    base_url = input(f"Base URL [{default_base_url}]: ").strip() or default_base_url
+    model = input(f"Model [{default_model_value}]: ").strip() or default_model_value
     api_key = input("API key: ").strip() or existing.get("LLM_API_KEY", "")
     return {"LLM_PROVIDER": provider, "LLM_BASE_URL": base_url, "LLM_MODEL": model, "LLM_API_KEY": api_key}

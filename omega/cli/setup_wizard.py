@@ -8,6 +8,7 @@ from importlib import resources
 from pathlib import Path
 import asyncpg
 from omega.cli.configuration import prompt_llm_settings, read_env, validate_llm_settings, write_env
+from omega.llm.provider_specs import sanitize_provider_error
 from omega.embeddings.embedding_service import EMBEDDING_DIM, get_embedding_service
 from omega.environment.conf_loader import omega_settings
 
@@ -78,7 +79,10 @@ def run_setup() -> int:
             _apply_schema(schema_file)
         settings = prompt_llm_settings(existing)
         print("Validating LLM settings...")
-        asyncio.run(validate_llm_settings(settings["LLM_PROVIDER"], settings["LLM_BASE_URL"], settings["LLM_API_KEY"], settings["LLM_MODEL"]))
+        try:
+            asyncio.run(validate_llm_settings(settings["LLM_PROVIDER"], settings["LLM_BASE_URL"], settings["LLM_API_KEY"], settings["LLM_MODEL"]))
+        except Exception as e:
+            raise ValueError(sanitize_provider_error(e)) from e
         print("Verifying embedding model")
         service = get_embedding_service()
         if len(service.generate_single_embedding("Omega setup check")) != EMBEDDING_DIM:

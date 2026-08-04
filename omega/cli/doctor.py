@@ -9,6 +9,7 @@ from omega.cli.logging_config import get_log_file
 from omega.embeddings.embedding_service import EMBEDDING_DIM, get_embedding_service
 from omega.environment.conf_loader import omega_settings
 from omega.llm.client import get_llm_provider
+from omega.llm.provider_specs import sanitize_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,8 @@ async def _check_database() -> DoctorCheck:
         connection = await _connect_database()
         await connection.fetchval("SELECT 1")
         return DoctorCheck("database", True, "Connected to PostgreSQL")
-    except Exception as e:
-        return DoctorCheck("database", False, f"Cannot connect: {e}")
+    except Exception:
+        return DoctorCheck("database", False, "Database is unavailable; run omega setup")
     finally:
         if connection is not None:
             await connection.close()
@@ -44,7 +45,7 @@ async def _check_pgvector() -> DoctorCheck:
             return DoctorCheck("pgvector", True, "The vector extension is installed")
         return DoctorCheck("pgvector", False, "The vector extension is not installed")
     except Exception as e:
-        return DoctorCheck("pgvector", False, f"Could not check extension: {e}")
+        return DoctorCheck("pgvector", False, f"Could not check the database extension")
     finally:
         if connection is not None:
             await connection.close()
@@ -65,7 +66,7 @@ async def _check_embedding_model() -> DoctorCheck:
             f"Loaded {omega_settings.embedding_model} ({len(vector)} dimensions)."
         )
     except Exception as e:
-        return DoctorCheck("embedding model", False, f"Could not load model: {e}")
+        return DoctorCheck("embedding model", False, f"Could not load the configured embedding model")
 
 
 async def _check_llm() -> DoctorCheck:
@@ -86,7 +87,7 @@ async def _check_llm() -> DoctorCheck:
             f"Validated {omega_settings.llm_provider}/{omega_settings.llm_model}",
         )
     except Exception as e:
-        return DoctorCheck("LLM provider", False, f"validation call failed: {e}")
+        return DoctorCheck("LLM provider", False, sanitize_provider_error(e))
 
 async def _check_memory_dir() -> DoctorCheck:
     path = Path(omega_settings.memory_dir).expanduser()

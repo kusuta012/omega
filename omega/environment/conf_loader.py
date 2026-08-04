@@ -1,11 +1,13 @@
 from pydantic_settings import BaseSettings
+from omega.llm.provider_specs import sanitize_provider_error, DEFAULT_PROVIDER, PROVIDER_SPECS
+_DEFAULT_PROVIDER = PROVIDER_SPECS[DEFAULT_PROVIDER]
 
 class OmegaSettings(BaseSettings):
     database_url: str = "postgresql://omega:pieistlecker@localhost:5432/omega_db"
-    llm_provider: str = "openai_compatible"
-    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_provider: str = DEFAULT_PROVIDER
+    llm_base_url: str = _DEFAULT_PROVIDER.base_url
     llm_api_key: str = ""
-    llm_model: str = "llama-3.1-8b-instant"
+    llm_model: str = _DEFAULT_PROVIDER.model
     openrouter_app_url: str = ""
     openrouter_app_title: str = ""
     session_token_budget: int = 64000

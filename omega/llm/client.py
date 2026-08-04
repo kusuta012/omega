@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception, retry_if_exception_type
 from omega.environment.conf_loader import omega_settings
+from omega.llm.provider_specs import ProviderSettings, normalize_provider_settings
 from omega.llm.streaming import (
     StreamEvent,
     StreamProtocolError,
@@ -113,10 +114,16 @@ def _provider_safe_tool_history(messages: list[dict]) -> list[dict]:
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    def __init__(self):
-        self.base_url = omega_settings.llm_base_url.rstrip("/")
-        self.api_key = omega_settings.llm_api_key
-        self.model = omega_settings.llm_model
+    def __init__(self, settings: ProviderSettings | None = None):
+        settings = settings or normalize_provider_settings(
+            omega_settings.llm_provider,
+            omega_settings.llm_base_url,
+            omega_settings.llm_api_key,
+            omega_settings.llm_model,
+        )
+        self.base_url = settings.base_url
+        self.api_key = settings.api_key
+        self.model = settings.model
         if not self.api_key:
             logger.warning("LLM_API_KEY is missing! llm generation will fail")
 
@@ -324,10 +331,16 @@ class OpenAICompatibleProvider(LLMProvider):
         
 
 class AnthropicProvider(LLMProvider):
-    API_URL = "https://api.anthropic.com/v1/messages"
-    def __init__(self):
-        self.api_key = omega_settings.llm_api_key
-        self.model = omega_settings.llm_model
+    def __init__(self, settings: ProviderSettings | None = None):
+        settings = settings or normalize_provider_settings(
+            omega_settings.llm_provider,
+            omega_settings.llm_base_url,
+            omega_settings.llm_api_key,
+            omega_settings.llm_model,
+        )
+        self.api_url = settings.base_url + "/v1/messages"
+        self.api_key = settings.api_key
+        self.model = settings.model
         if not self.api_key:
             logger.warning("LLM_API_KEY is missing! llm generation will fail")
 
@@ -346,7 +359,7 @@ class AnthropicProvider(LLMProvider):
     )
     async def _call_api(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(self.API_URL, json=payload, headers=self._headers())
+            response = await client.post(self.api_url, json=payload, headers=self._headers())
             response.raise_for_status()
             return response.json()
 
@@ -492,7 +505,7 @@ class AnthropicProvider(LLMProvider):
         usage: dict[str, int] = {}
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=15)) as client:
-            async with client.stream("POST", self.API_URL, json=payload, headers=self._headers()) as response:
+            async with client.stream("POST", self.api_url, json=payload, headers=self._headers()) as response:
                 response.raise_for_status()
                 async for data_line in iter_sse_data(response):
                     try:
@@ -541,13 +554,18 @@ class AnthropicProvider(LLMProvider):
 def get_llm_provider() -> LLMProvider:
     global _llm_provider
     if _llm_provider is None:
-        provider_type = omega_settings.llm_provider.lower()
-        if provider_type in {"openai_compatible", "openrouter"}:
-            _llm_provider = OpenAICompatibleProvider()
-        elif provider_type == "anthropic":
-            _llm_provider = AnthropicProvider()
+        settings = normalize_provider_settings(
+            omega_settings.llm_provider,
+            omega_settings.llm_base_url,
+            omega_settings.llm_api_key,
+            omega_settings.llm_model,
+        )
+        if settings.spec.protocol == "openai":
+            _llm_provider = OpenAICompatibleProvider(settings)
+        elif settings.spec.protocol == "anthropic":
+            _llm_provider = AnthropicProvider(settings)
         else:
-            raise ValueError(f"Unknown LLM_PROVIDER: {provider_type}, use 'openai_compatible' or 'anthropic'..")
+            raise ValueError(f"Unsupported LLM provider protocol: {settings.spec.protocol}")
     return _llm_provider
 
 _llm_provider: LLMProvider | None = None
