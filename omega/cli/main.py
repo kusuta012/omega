@@ -48,6 +48,12 @@ def _build_parser() -> argparse.ArgumentParser:
     kb_list_parser = kb_subparsers.add_parser("list", help="list knowledge-base items")
     kb_list_parser.add_argument("--limit", type=int, default=20, choices=range(1, 101))
     kb_list_parser.add_argument("--status", choices=["pending", "running", "done", "failed"])
+    for name, help_text in (("status", "show one item and its jobs"), ("retry", "retry a failed item")):
+        command_parser = kb_subparsers.add_parser(name, help=help_text)
+        command_parser.add_argument("item_id")
+    kb_remove_parser = kb_subparsers.add_parser("remove", help="remove one knowledge-base item")
+    kb_remove_parser.add_argument("item_id")
+    kb_remove_parser.add_argument("--yes", action="store_true", help="confirm permanent removal")
     uninstall_parser = subparsers.add_parser("uninstall", help="remove the installed Omega package")
     uninstall_parser.add_argument("--yes", action="store_true", help="confirm the package removal")
 

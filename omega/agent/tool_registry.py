@@ -11,7 +11,7 @@ from omega.storage.memory_queries import store_extracted_fact, find_similar_fact
 from omega.storage.postgres_session import db_pool
 from omega.llm.client import get_llm_provider
 from omega.embeddings.embedding_service import get_embedding_service
-from omega.knowledge_ingestion import enqueue_ingestion_job, enqueue_knowledge_ingestion, is_explicit_ingestion_req
+from omega.knowledge_ingestion import enqueue_knowledge_ingestion, is_explicit_ingestion_req
 
 logger = logging.getLogger("ToolRegistry")
 
@@ -346,7 +346,7 @@ class ToolExecutor:
             "answer": answer, 
             "item_id": queued["item_id"],
             "job_id": queued["job_id"],
-            "duplicated": queued["duplicate"],
+            "duplicate": queued["duplicate"],
             "result_summary": f"ingest_knowledge: {queued['status']}",
         }
 

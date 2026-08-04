@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from omega.agent.agent_loop import AgentLoop
-from omega.knowledge_ingestion import enqueue_ingestion_job, enqueue_knowledge_ingestion
+from omega.knowledge_ingestion import enqueue_knowledge_ingestion
 from omega.storage.management_queries import (
     delete_item,
     get_item_detail,
@@ -125,7 +125,7 @@ def run_kb_command(
         item = item_detail["item"]
         print(f"{item['id']}  {item['status']}  {item['source_type']}  {item['title'] or 'Untitled'}")
         for job in item_detail["jobs"]:
-            print(f"job {job["id"]}  {job['status']} attempts={job['attempts']}")
+            print(f"job {job['id']}  {job['status']} attempts={job['attempts']}")
         return 0
     if command == "retry":
         if "error" in result:
