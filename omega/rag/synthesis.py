@@ -72,7 +72,11 @@ class Synthesis:
             sources_meta.append({
                 "label": source_label,
                 "title": chunk['source_title'],
-                "score": round(chunk['rrf_score'], 4)
+                "score": round(chunk['rrf_score'], 4),
+                "start_offset": chunk["start_offset"],
+                "end_offset": chunk["end_offset"],
+                "page_start": chunk["page_start"],
+                "page_end": chunk["page_end"],
             })
 
         compiled_context = "\n\n".join(context_passages)

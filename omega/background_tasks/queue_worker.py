@@ -3,9 +3,6 @@ import contextlib
 import logging
 import multiprocessing
 from queue import Empty
-
-from torch._higher_order_ops.auto_functionalize import is_alias
-from omega.chunking import chunk_splitter
 from omega.storage.postgres_session import db_pool
 from omega.storage.queue_queries import (
     claim_next_job, renew_job_claim, release_job_claim, mark_job_failed, reset_stuck_jobs
@@ -51,7 +48,7 @@ JOB_EXECUTION_TIMEOUT = 9 * 60
 def parse_and_embed_item(item: dict, result_queue):
     try:
         parsed = extract_item_content(item)
-        chunks = chunk_splitter.split_chunks(parsed['raw_content'])
+        chunks = chunk_splitter.split_document(parsed['raw_content'])
         embeddings = embedding_service.generate_embeddings(chunks)
         result_queue.put(("ok", parsed, chunks, embeddings))
     except Exception as err:

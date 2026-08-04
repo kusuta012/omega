@@ -5,7 +5,7 @@ async def replace_item_content_and_chunks(
     item_id: str,
     title: str,
     parsed_content: str,
-    chunks: list[str],
+    chunks: list[dict],
     embeddings: list[list[float]],
     job_id: str | None = None,
     claim_token: str | None = None,
@@ -18,8 +18,16 @@ async def replace_item_content_and_chunks(
         raise ValueError("parsed content produced no chunks")
 
     records = [
-        (item_id, index, chunk_text, json.dumps(embedding))
-        for index, (chunk_text, embedding) in enumerate(zip(chunks, embeddings))
+        (
+            item_id,
+            index,
+            chunk["content"],
+            chunk["start_offset"],
+            chunk["end_offset"],
+            chunk.get("page_start"),
+            chunk.get("page_end"),
+            json.dumps(embedding))
+        for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
     ]
     async with db_pool.acquire() as conn:
         async with conn.transaction():
@@ -32,8 +40,8 @@ async def replace_item_content_and_chunks(
                 raise ValueError(f"Item record {item_id} not found")
             await conn.execute("DELETE FROM chunks WHERE item_id = $1", item_id)
             await conn.executemany("""
-                INSERT INTO chunks (item_id, chunk_index, content, embedding)
-                VALUES ($1, $2, $3, $4::vector)
+                INSERT INTO chunks (item_id, chunk_index, content, page_start, page_end, embedding)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
             """, records)
             if job_id is not None:
                 completed = await conn.execute("""

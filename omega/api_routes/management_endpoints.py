@@ -41,7 +41,11 @@ async def get_single_item(item_id: str):
             {
                 "id": str(c["id"]),
                 "chunk_index": c["chunk_index"],
-                "content": c["content"]
+                "content": c["content"],
+                "start_offset": c["start_offset"],
+                "end_offset": c["end_offset"],
+                "page_start": c["page_start"],
+                "page_end": c["page_end"],
             }
             for c in result["chunks"]
         ],

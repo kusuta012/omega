@@ -33,7 +33,7 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
     embedding_json = json.dumps(query_embedding)
     hybrid_query = """
         WITH vector_search AS (
-            SELECT id, item_id, chunk_index, content,
+            SELECT id, item_id, chunk_index, content, start_offset, end_offset, page_start, page_end,
                 ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) as rank
             FROM chunks
             WHERE embedding <=> $1::vector < $4
@@ -41,7 +41,7 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
             LIMIT 20
         ),
         keyword_search AS(
-            SELECT id, item_id, chunk_index, content,
+            SELECT id, item_id, chunk_index, content, start_offset, end_offset, page_start, page_end,
                     ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english',$2)) DESC) as rank
             FROM chunks
             WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $2)
@@ -54,6 +54,10 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
                 COALESCE(v.id, k.id) as chunk_id,
                 COALESCE(v.item_id, k.item_id) as item_id,
                 COALESCE(v.content, k.content) as chunk_text,
+                COALESCE(v.start_offset, k.start_offset) as start_offset,
+                COALESCE(v.end_offset, k.end_offset) as end_offset,
+                COALESCE(v.page_start, k.page_start) as page_start,
+                COALESCE(v.page_end, k.page_end) as page_end,
                 (COALESCE(1.0 / (60 + v.rank), 0.0) + COALESCE(1.0 / (60 + k.rank), 0.0)) as rrf_score
             FROM vector_search v
             FULL OUTER JOIN keyword_search k ON v.id = k.id
@@ -62,6 +66,10 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
             r.chunk_id,
             r.item_id,
             r.chunk_text,
+            r.start_offset,
+            r.end_offset,
+            r.page_start,
+            r.page_end,
             r.rrf_score,
             i.title AS source_title,
             i.source_ref

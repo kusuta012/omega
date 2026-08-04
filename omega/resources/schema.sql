@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     item_id UUID REFERENCES items(id) ON DELETE CASCADE,
     chunk_index INT,
     content TEXT,
+    start_offset INT,
+    end_offset INT,
+    page_start INT,
+    page_end INT,
     embedding VECTOR(384),
     created_at TIMESTAMP DEFAULT now()
 );
