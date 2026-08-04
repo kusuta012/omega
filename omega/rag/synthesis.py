@@ -45,6 +45,9 @@ class Synthesis:
         return [query]
 
     async def search_knowledge(self, query: str, top_k: int = 5) -> list[dict]:
+        query = query.strip()
+        if not query:
+            return []
         query_vector = self.embedding_service.generate_single_embedding(query)
         return await search_hybrid_chunks(query, query_vector, top_k)
 
@@ -72,6 +75,10 @@ class Synthesis:
             sources_meta.append({
                 "label": source_label,
                 "title": chunk['source_title'],
+                "item_id": str(chunk["item_id"]),
+                "chunk_index": chunk["chunk_index"],
+                "source_ref": chunk["source_ref"],
+                "source_type": chunk["source_type"],
                 "score": round(chunk['rrf_score'], 4),
                 "start_offset": chunk["start_offset"],
                 "end_offset": chunk["end_offset"],

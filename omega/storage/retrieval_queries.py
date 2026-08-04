@@ -53,6 +53,7 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
             SELECT
                 COALESCE(v.id, k.id) as chunk_id,
                 COALESCE(v.item_id, k.item_id) as item_id,
+                COALESCE(v.chunk_index, k.chunk_index) as chunk_index,
                 COALESCE(v.content, k.content) as chunk_text,
                 COALESCE(v.start_offset, k.start_offset) as start_offset,
                 COALESCE(v.end_offset, k.end_offset) as end_offset,
@@ -65,6 +66,7 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
         SELECT
             r.chunk_id,
             r.item_id,
+            r.chunk_index,
             r.chunk_text,
             r.start_offset,
             r.end_offset,
@@ -72,11 +74,13 @@ async def search_hybrid_chunks(query_text: str, query_embedding: list[float], to
             r.page_end,
             r.rrf_score,
             i.title AS source_title,
+            i.source_type,
             i.source_ref
         FROM rrf_fusion r
         JOIN items i ON r.item_id = i.id
         WHERE r.rrf_score >= $6
-        ORDER BY r.rrf_score DESC
+          AND i.status = 'done'
+        ORDER BY r.rrf_score DESC, r.item_id, r.chunk_index
         LIMIT $3;
     """
 
