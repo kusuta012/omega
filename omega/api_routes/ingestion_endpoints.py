@@ -9,25 +9,22 @@ async def add_item(request: IngestionRequest):
     if request.source_type not in ["url", "pdf", "text", "code"]:
         raise HTTPException(status_code=400, detail="Invalid source type")
 
-    try:
-        item_id, job_id, is_duplicate = await enqueue_ingestion_job(
-            source_type=request.source_type,
-            source_ref=request.source_ref,
-            raw_content=request.raw_content,
-            title=request.title
-        )
+    item_id, job_id, is_duplicate = await enqueue_ingestion_job(
+        source_type=request.source_type,
+        source_ref=request.source_ref,
+        raw_content=request.raw_content,
+        title=request.title
+    )
 
-        if is_duplicate:
-            return {
-                "message": "Item already exists in the knowledge base, Skipped duplication",
-                "item_id": item_id,
-                "job_id": None
-            }
-            
+    if is_duplicate:
         return {
-            "message": "Item successfully queued for processing",
+            "message": "Item already exists in the knowledge base, Skipped duplication",
             "item_id": item_id,
-            "job_id": job_id
+            "job_id": None
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+            
+    return {
+        "message": "Item successfully queued for processing",
+        "item_id": item_id,
+        "job_id": job_id
+    }

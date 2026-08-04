@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from omega.api_routes.query_schemas import QueryRequest
 from omega.rag.synthesis import Synthesis
 
@@ -7,17 +7,10 @@ rag_engine = Synthesis()
 
 @retrieval_router.post("/search")
 async def raw_hybrid_search(request: QueryRequest):
-    try:
-        results = await rag_engine.search_knowledge(request.query, request.top_k)
-        return {
-            "query": request.query, "results": results
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    results = await rag_engine.search_knowledge(request.query, request.top_k)
+    return {"query": request.query, "results": results}
+
 
 @retrieval_router.post("/ask")
 async def ask_knowledge(request: QueryRequest):
-    try:
-        return await rag_engine.answer_question(request.query, request.top_k)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return await rag_engine.answer_question(request.query, request.top_k)
