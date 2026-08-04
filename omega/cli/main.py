@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from omega import __version__   
 from omega.cli.doctor import print_doctor_report, run_doctor
-from omega.cli.lifecycle import run_new_session, run_uninstall
+from omega.cli.lifecycle import run_new_session, run_uninstall, run_ingest, run_kb_command
 from omega.cli.log_viewer import show_logs
 from omega.cli.logging_config import configure_logging
 from omega.cli.repl import run_repl
@@ -38,6 +38,16 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("config", help="Update and validate LLM provider settings")
     subparsers.add_parser("doctor", help="run independent environment health checks.")
     subparsers.add_parser("new", help="start a new persisted session")
+    ingest_parser = subparsers.add_parser("ingest", help="queue a URL, text, or code item for the knowledge base")
+    ingest_parser.add_argument("source_type", choices=["url", "text", "code"])
+    ingest_parser.add_argument("content", nargs="?", help="URL, text, or code content")
+    ingest_parser.add_argument("--file", dest="file_path", help="Read text or code content from a UTF-8 file")
+    ingest_parser.add_argument("--title", help="Optional item title")
+    kb_parser = subparsers.add_parser("kb", help="inspect and manage knowledge-base items")
+    kb_subparsers = kb_parser.add_subparsers(dest="kb_command", required=True)
+    kb_list_parser = kb_subparsers.add_parser("list", help="list knowledge-base items")
+    kb_list_parser.add_argument("--limit", type=int, default=20, choices=range(1, 101))
+    kb_list_parser.add_argument("--status", choices=["pending", "running", "done", "failed"])
     uninstall_parser = subparsers.add_parser("uninstall", help="remove the installed Omega package")
     uninstall_parser.add_argument("--yes", action="store_true", help="confirm the package removal")
 
@@ -69,6 +79,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_uninstall(yes=args.yes)
     if args.command == "new":
         return run_new_session()
+    if args.command == "ingest":
+        return run_ingest(args.source_type, args.content, args.title, args.file_path)
+    if args.command == "kb":
+        return run_kb_command(
+            args.kb_command,
+            getattr(args, "item_id", None),
+            getattr(args, "limit", 20),
+            getattr(args, "status", None),
+            getattr(args, "yes", False),
+        )
     if args.command == "doctor":
         return 0 if print_doctor_report(asyncio.run(run_doctor())) else 1
     if args.command == "logs":

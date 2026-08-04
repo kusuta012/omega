@@ -129,7 +129,7 @@ class AgentLoop:
             rejected_results: dict[str, dict] = {}
             safe_tool_calls = []
             for tc in response.tool_calls:
-                if tool_results_seen_this_turn and tc.name in DURABLE_MEMORY_TOOLS:
+                if tool_results_seen_this_turn and (tc.name in DURABLE_MEMORY_TOOLS or tc.name == "ingest_knowledge"):
                     err = f"{tc.name} blocked: tool results exist since the current user message"
                     logger.warning(err)
                     rejected_results[tc.id] = {
@@ -285,7 +285,7 @@ class AgentLoop:
             rejected_results: dict[str, dict] = {}
             safe_tool_calls = []
             for tool_call in streamed_tool_calls:
-                if tool_results_seen_this_turn and tool_call.name in DURABLE_MEMORY_TOOLS:
+                if tool_results_seen_this_turn and (tool_call.name in DURABLE_MEMORY_TOOLS or tool_call.name == "ingest_knowledge"):
                     err = (f"{tool_call.name} blocked: tool results exist since the current user message")
                     logger.warning(err)
                     rejected_results[tool_call.id] = {
