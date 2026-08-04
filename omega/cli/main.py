@@ -18,6 +18,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="omega",
         description="Omega, a local-first personal memory agent.",
+        epilog=(
+            "For detailed help, run 'omega <command> --help'.\n"
+            "Knowledge-base commands: 'omega kb --help'.\n"
+            "Inside Omega, type '/commands' for chat commands."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"Omega {__version__}")
     parser.add_argument(
