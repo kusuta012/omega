@@ -46,10 +46,10 @@ async def handle_command(text: str, agent: "AgentLoop") -> CommandResult:
         session_id = await agent.new_session()
         return CommandResult(f"Started a new session: {session_id}")
     if command == "/status":
-        session_id = agent.session_manager.active_session_id or "not started"
+        session_id = agent.session_manager.active_session_id
         if session_id is None:
             session_label = "not started"
-            messages_count = 0
+            message_count = 0
         else:
             session_label = str(session_id)
             message_count = len(await get_session_messages(session_id))

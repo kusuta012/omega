@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import asyncio
+import sys
 from collections.abc import Sequence
 from omega import __version__   
 from omega.cli.doctor import print_doctor_report, run_doctor
@@ -45,16 +46,18 @@ def _build_parser() -> argparse.ArgumentParser:
     logs_parser.add_argument("--lines", type=int, default=100, help="Number of recent lines to show.")
     return parser
 
-async def _run_with_database(coroutine) -> int:
+async def _run_with_database(run_client) -> int:
     await db_pool.connect()
     try:
-        return await coroutine
+        return await run_client()
     finally:
         await db_pool.disconnect()
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command is not None and (args.cli or args.continue_session):
+        parser.error("--cli and --continue are available only for the interactive client")
     interactive_tui = args.command is None and not args.cli
     configure_logging(mode="tui" if interactive_tui else "cli")
 
@@ -75,8 +78,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(str(exc))
             return 2
     if args.cli:
-        return asyncio.run(_run_with_database(run_repl(continue_session=args.continue_session)))
-    return asyncio.run(_run_with_database(run_tui(continue_session=args.continue_session)))
+        run_client = lambda: run_repl(continue_session=args.continue_session)
+    else:
+        run_client = lambda: run_tui(continue_session=args.continue_session)
+    try:
+        return asyncio.run(_run_with_database(run_client))
+    except KeyboardInterrupt:
+        print("\nOmega stopped", file=sys.stderr)
+        return 130
+    except Exception as err:
+        print(f"Omega could not start: {err}", file=sys.stderr)
+        return 1
+
 
 
 if __name__ == "__main__":

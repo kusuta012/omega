@@ -17,7 +17,7 @@ def run_new_session() -> int:
     try:
         session_id = asyncio.run(create_new_session())
     except Exception as ex:
-        print(f"Could not a start a new session: {ex}")
+        print(f"Could not start a new session: {ex}")
         return 1
     print(f"Started a new session: {session_id}")
     return 0
