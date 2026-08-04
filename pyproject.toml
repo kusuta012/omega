@@ -1,13 +1,16 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "omega-agent"
 version = "0.1.0"
-description = "A local personal memory agent ig"
+description = "A local-first personal agent with persistent conversations, memory, and a searchable knowledge base."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = ["ai", "agent", "llm", "memory", "knowledge-base", "terminal", "harness"]
 dependencies = [
     "fastapi",
     "uvicorn",
@@ -20,6 +23,11 @@ dependencies = [
     "tenacity",
     "prompt-toolkit"
 ]
+
+[project.urls]
+Homepage = "https://github.com/kusuta012/omega"
+Repository = "https://github.com/kusuta012/omega"
+Issues = "https://github.com/kusuta012/omega/issues"
 
 [project.scripts]
 omega = "omega.cli.main:main"
