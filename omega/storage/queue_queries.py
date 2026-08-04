@@ -87,7 +87,7 @@ async def mark_job_failed(job_id: str, item_id: str, error_msg: str, attempts: i
             else:
                 await conn.execute("""
                     UPDATE jobs
-                    SET status = 'pending', last_error = $1, update_at = now()
+                    SET status = 'pending', last_error = $1, updated_at = now()
                     WHERE id = $2 AND status = 'running' AND claim_token = $3
                 """, error_msg, job_id, claim_token)
 

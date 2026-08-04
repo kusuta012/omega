@@ -141,7 +141,7 @@ async def execute_job(job: dict):
         await mark_job_failed(job_id, item_id, str(error), attempts, claim_token)
     finally:
         heartbeat_task.cancel()
-        with contextlib.supress(asyncio.CancelledError):
+        with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
 
 async def stuck_job_monitor():
