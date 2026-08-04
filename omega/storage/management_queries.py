@@ -146,33 +146,34 @@ async def list_jobs(page: int = 1, page_size: int = 20, status: str | None = Non
 
 async def retry_failed_item(item_id: str) -> dict:
     async with db_pool.acquire() as conn:
-        item = await conn.fetchrow(
-            "SELECT id, status, title FROM items WHERE id = $1", item_id
-        )
-
-        if not item:
-            return {"error": "not_found", "message": "item not found"}
-
-        if item['status'] != 'failed':
-            return {
-                "error": "invalid_status",
-                "message": f"Item is currently in '{item['status']}' state, only failed items can be retired"
-            }
-
-        job = await conn.fetchrow("""
-            SELECT id, status FROM jobs
-            WHERE item_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1
-        """, item_id)
-
         async with conn.transaction():
+            item = await conn.fetchrow(
+                "SELECT id, status, title FROM items WHERE id = $1 FOR UPDATE", item_id
+            )
+            if not item:
+                return {"error": "not_found", "message": "item not found"}
+            if item['status'] != 'failed':
+                return {
+                    "error": "invalid_status",
+                    "message": f"Item is currently in '{item['status']}' state, only failed items can be retired",
+                }
+
+            job = await conn.fetchrow("""
+                SELECT id, status FROM jobs
+                WHERE item_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                FOR UPDATE
+            """, item_id)
             if job and job['status'] == 'failed':
-                await conn.execute("""
+                reset = await conn.execute("""
                     UPDATE jobs
-                    SET status = 'pending', attempts = 0, last_error = NULL, updated_at = now()
-                    WHERE id = $1
+                    SET status = 'pending', attempts = 0, claim_token = NULL,
+                        last_error = NULL, updated_at = now()
+                    WHERE id = $1 AND status = 'failed'
                 """, job['id'])
+                if reset != "UPDATE 1":
+                    return {"error": "conflict", "message": "job state changed while retrying"}
                 await conn.execute(
                     "UPDATE items SET status = 'pending' WHERE id = $1", item_id
                 )
@@ -182,25 +183,23 @@ async def retry_failed_item(item_id: str) -> dict:
                     "job_id": str(job['id']),
                     "message": f"Re-queued '{item['title']}' for processing"
                 }
-            
-            elif job and job['status'] in ('pending', 'running'):
+            if job and job['status'] in ('pending', 'running'):
                 return {
                     "error": "conflict",
                     "message": f"A job for this item is already {job['status']}, cannot retry"
                 }
 
-            else:
-                job_id = await conn.fetchval("""
-                    INSERT INTO jobs (item_id, job_type, status)
-                    VALUES ($1, 'ingest', 'pending')
-                    RETURNING id
-                """, item_id)
-                await conn.execute(
-                    "UPDATE items SET status = 'pending' WHERE id = $1", item_id
-                )
-                return {
-                    "success": True,
-                    "item_id": str(item_id),
-                    "job_id": str(job_id),
-                    "message": f"Created new job for '{item['title']}' (original job was missing)"
-                }
+            job_id = await conn.fetchval("""
+                INSERT INTO jobs (item_id, job_type, status)
+                VALUES ($1, 'ingest', 'pending')
+                RETURNING id
+            """, item_id)
+            await conn.execute(
+                "UPDATE items SET status = 'pending' WHERE id = $1", item_id
+            )
+            return {
+                "success": True,
+                "item_id": str(item_id),
+                "job_id": str(job_id),
+                "message": f"Created new job for '{item['title']}' (original job was missing)"
+            }

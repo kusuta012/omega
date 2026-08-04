@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_type TEXT,
     status TEXT DEFAULT 'pending',
     attempts INT DEFAULT 0,
+    claim_token UUID,
     last_error TEXT,
     created_at TIMESTAMP DEFAULT now(),
     updated_at TIMESTAMP DEFAULT now()
