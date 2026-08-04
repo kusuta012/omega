@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .env
 omega_memory/
+build/
+omega_agent.egg-info

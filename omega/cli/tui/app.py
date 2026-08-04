@@ -176,6 +176,7 @@ class OmegaTui:
         text = buffer.text.strip()
         buffer.reset()
         if text and (self.turn_task is None or self.turn_task.done()):
+            self.transcript.start_turn()
             self.turn_task = asyncio.create_task(self._handle_input(text))
         return True
 
@@ -193,7 +194,6 @@ class OmegaTui:
         finally:
             self.state = "idle"
             self.turn_started_at = None
-            self.input.buffer.reset()
             self.application.invalidate()
     
     async def _handle_command(self, text: str) -> None:

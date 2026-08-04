@@ -108,6 +108,9 @@ class Transcript:
         self.following_output = True
         self.area.buffer.cursor_position = len(self.area.buffer.text)
 
+    def start_turn(self) -> None:
+        self.follow_latest()
+
     def scroll_to_top(self) -> None:
         self.following_output = False
         self.area.window.vertical_scroll = 0
