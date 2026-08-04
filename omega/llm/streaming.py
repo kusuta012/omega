@@ -1,5 +1,4 @@
 from __future__ import annotations
-from ast import arguments
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -9,13 +8,13 @@ from typing import Any, Literal
 logger = logging.getLogger("LLMStreaming")
 
 class StreamProtocolError(ValueError):
-        """d"""
+    pass
 
 @dataclass(frozen=True)
 class ToolCall:
     id: str
     name: str
-    arguments: dict[str, any]
+    arguments: dict[str, Any]
 
 @dataclass(frozen=True)
 class StreamEvent:

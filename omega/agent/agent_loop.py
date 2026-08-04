@@ -249,7 +249,7 @@ class AgentLoop:
                     f"I've reached my limit of {omega_settings.max_tool_rounds_per_turn}"
                     "tool-calling rounds, let me answer with what I have"
                 )
-                logger.warning(f"Hard tool-round cap hit {omega_settings.max_tool_rounds_per_turn, user_message[:80]}")
+                logger.warning(f"Hard tool-round cap hit {omega_settings.max_tool_rounds_per_turn} for message: {user_message[:80]}")
                 yield AgentEvent.text_delta(bail)
                 await self.session_manager.add_message("assistant", bail)
                 await self.session_manager.check_and_compress(self.tools_schema_text)
