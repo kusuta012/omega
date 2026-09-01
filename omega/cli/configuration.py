@@ -27,8 +27,13 @@ def write_env(updates: dict[str, str], path: Path = ENV_PATH) -> None:
     existing.update(updates)
     lines = [f"{key}={value}" for key, value in sorted(existing.items())]
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    try:
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 async def validate_llm_settings(provider: str, base_url: str, api_key: str, model: str) -> None:
     settings = normalize_provider_settings(provider, base_url, api_key, model)

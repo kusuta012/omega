@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "omega-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "A local-first personal agent with persistent conversations, memory, and a searchable knowledge base."
 readme = "README.md"
 license = "MIT"

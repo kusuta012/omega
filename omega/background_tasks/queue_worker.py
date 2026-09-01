@@ -3,6 +3,7 @@ import contextlib
 import logging
 import multiprocessing
 from queue import Empty
+from omega.embeddings import embedding_service
 from omega.storage.postgres_session import db_pool
 from omega.storage.queue_queries import (
     claim_next_job, renew_job_claim, release_job_claim, mark_job_failed, reset_stuck_jobs
@@ -18,7 +19,6 @@ logger = logging.getLogger("OmegaWorker")
 
 extractor_router = ContentExtractorRouter()
 chunk_splitter = ChunkSplitter(chunk_size=700, chunk_overlap=100)
-embedding_service = get_embedding_service()
 
 CLAIM_HEARTBEAT_SECONDS = 60
 
@@ -44,15 +44,28 @@ def extract_item_content(item: dict) -> dict:
     ))
 
 JOB_EXECUTION_TIMEOUT = 9 * 60
+RESULT_QUEUE_DRAIN_TIMEOUT = 1.0
 
 def parse_and_embed_item(item: dict, result_queue):
     try:
+        embedding_service = get_embedding_service()
         parsed = extract_item_content(item)
         chunks = chunk_splitter.split_document(parsed['raw_content'])
         embeddings = embedding_service.generate_embeddings([chunk['content'] for chunk in chunks])
         result_queue.put(("ok", parsed, chunks, embeddings))
     except Exception as err:
         result_queue.put(("error", str(err)))
+
+async def read_process_result(result_queue):
+    try:
+        return result_queue.get_nowait()
+    except Empty:
+        try:
+            return await asyncio.to_thread(
+                result_queue.get, True, RESULT_QUEUE_DRAIN_TIMEOUT
+            )
+        except Empty as error:
+            raise RuntimeError("Ingestion subprocess exited without a result") from error
 
 async def parse_and_embed_in_subprocess(item: dict):
     context = multiprocessing.get_context("fork")
@@ -69,20 +82,23 @@ async def parse_and_embed_in_subprocess(item: dict):
                 await asyncio.sleep(0.05)
         if result is None:
             try:
-                result = result_queue.get_nowait()
-            except Empty:
-                raise RuntimeError(f"Ingestion subprocess exited without a result (exit code {process.exitcode})")
+                result = await read_process_result(result_queue)
+            except RuntimeError as error:
+                raise RuntimeError(
+                    f"Ingestion subprocess exited without a result (exit code {process.exitcode})"
+                    ) from error
         if result[0] != "ok":
             raise RuntimeError(f"Document processing failed: {result[1]}")
         return result[1:]
     finally:
         if process.is_alive():
             process.terminate()
-            await asyncio.to_thread(process.join, 2)
+        await asyncio.to_thread(process.join, 2)
         if process.is_alive():
             process.kill()
             await asyncio.to_thread(process.join, 2)
         result_queue.close()
+        await asyncio.to_thread(result_queue.join_thread)
 
 async def process_job(job_id: str, item_id: str, claim_token: str, ownership_lost: asyncio.Event):
     item = await fetch_item_by_id(item_id)
@@ -167,10 +183,16 @@ async def worker_loop():
         logger.info("Worker shutting down gracefully...")
     finally:
         monitor_task.cancel()
+        await asyncio.gather(monitor_task, return_exceptions=True)
         await db_pool.disconnect()
 
-if __name__ == "__main__":
+def main() -> int:
     try:
         asyncio.run(worker_loop())
     except KeyboardInterrupt:
         logger.info("Worker process killed by user")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+    

@@ -154,3 +154,7 @@ def run_uninstall(*, yes: bool) -> int:
     except OSError as exc:
         print(f"Could not run the package installer: {exc}")
         return 1
+
+def run_worker() -> int:
+    from omega.background_tasks.queue_worker import main as worker_main
+    return worker_main()

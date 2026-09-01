@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from omega import __version__   
 from omega.cli.doctor import print_doctor_report, run_doctor
-from omega.cli.lifecycle import run_new_session, run_uninstall, run_ingest, run_kb_command
+from omega.cli.lifecycle import run_new_session, run_uninstall, run_ingest, run_kb_command, run_worker
 from omega.cli.log_viewer import show_logs
 from omega.cli.logging_config import configure_logging
 from omega.cli.repl import run_repl
@@ -43,6 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("setup", help="Setup Omega and validate local dependencies.")
     subparsers.add_parser("config", help="Update and validate LLM provider settings")
     subparsers.add_parser("doctor", help="run independent environment health checks.")
+    subparsers.add_parser("worker", help="process queued knowledge-base items")
     subparsers.add_parser("new", help="start a new persisted session")
     ingest_parser = subparsers.add_parser("ingest", help="queue a URL, text, or code item for the knowledge base")
     ingest_parser.add_argument("source_type", choices=["url", "text", "code"])
@@ -89,6 +90,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_config()
     if args.command == "uninstall":
         return run_uninstall(yes=args.yes)
+    if args.command == "worker":
+        return run_worker()
     if args.command == "new":
         return run_new_session()
     if args.command == "ingest":

@@ -286,6 +286,7 @@ class OpenAICompatibleProvider(LLMProvider):
                     response.raise_for_status()
                     async for data_line in iter_sse_data(response):
                         if data_line == "[DONE]":
+                            terminal_event_received = True
                             break
                         try:
                             event = json.loads(data_line)
@@ -317,12 +318,17 @@ class OpenAICompatibleProvider(LLMProvider):
                     ) from e 
                 raise
         
-        if not terminal_event_received:
-            raise StreamProtocolError(
-                "OpenAI compatible stream ended before a provider completion event"
-            )
-
         completed_tool_calls = accumulator.finalize()
+        if not terminal_event_received:
+            if not emitted_content and not completed_tool_calls:
+                raise StreamProtocolError(
+                    "OpenAI compatible stream ended before a provider completion event"
+                )
+            logger.warning(
+                "OpenAI compatible stream ended at a clean EOF without an explicit completion marker"
+            )
+            finish_reason = "tool_calls" if completed_tool_calls else "stop"
+
         for tool_call in completed_tool_calls:
             yield StreamEvent.completed_tool_call(tool_call)
         if not emitted_content and not completed_tool_calls:
